@@ -7,9 +7,8 @@
 ## Текущий этап
 
 Реализован фундамент бэкенда (слой персистентности и все эндпоинты создания/чтения/
-списка, не связанные с ИИ), а также — на этом этапе — строгая схема проверки вместе с
-детерминированным контролем качества (QC). Всё это работает полностью без обращения к
-OpenAI и без доступа к сети. А именно:
+списка, не связанные с ИИ), строгая схема проверки вместе с детерминированным контролем
+качества (QC), а также — на этом этапе — клиент OpenAI Structured Outputs. А именно:
 
 - приложение FastAPI со стартапом (`lifespan`) и созданием схемы базы данных;
 - модели SQLAlchemy для таблиц `documents`, `reviews`, `audit_runs`;
@@ -28,19 +27,42 @@ OpenAI и без доступа к сети. А именно:
 - безопасная фабрика отката (fallback) для типовых технических сбоев (`MODEL_ERROR`,
   `INVALID_JSON`, `SCHEMA_MISMATCH`) — без выдуманных находок, с русскоязычным резюме
   и одним безопасным уточняющим вопросом;
+- клиент OpenAI Structured Outputs (`app/llm/`): синхронный, нестриминговый вызов
+  `client.responses.with_raw_response.parse(...)` с `text_format=ModelReviewDraft` и
+  `store=False`. Сначала проверяется top-level `status` сырого ответа; только для
+  `status="completed"` вызывается `raw_response.parse()`, запускающий разбор Structured
+  Outputs, и результат берётся из `response.output_parsed`. Это гарантирует, что
+  ответ со `status="incomplete"` (частичный/усечённый `output_text`) классифицируется
+  как `LLMProviderError`, а не ошибочно как invalid JSON или schema mismatch. Успех
+  возвращается как валидированный экземпляр `ModelReviewDraft`, либо выбрасывается одна
+  из типизированных ошибок (`LLMConfigurationError`, `LLMProviderError`, `LLMAPIError`,
+  `LLMTransportError`, `LLMInvalidJSONError`, `LLMSchemaMismatchError`);
+- системный prompt на русском языке (`app/llm/prompts.py`), требующий рецензировать
+  только переданный документ, отвечать на русском, относиться к тексту документа как к
+  недоверенным данным, игнорировать встроенные в документ инструкции, не выдумывать
+  находки и никогда не возвращать `needs_review`/`review_reason_codes` или иные поля
+  вне схемы `ModelReviewDraft`; закреплены версии:
+  `PROMPT_VERSION = "spec-review-prompt-v1"`, `REVIEW_SCHEMA_VERSION = "spec-review-schema-v1"`;
 - автоматические тесты на изолированной временной базе SQLite, включая обширные тесты
-  строгих схем, детерминированного QC и фабрики отката.
+  строгих схем, детерминированного QC, фабрики отката, prompt-констант и LLM-клиента.
+  Тесты клиента полностью офлайн: большинство используют инжектируемый fake/stub-клиент
+  (или ошибки SDK, поднятые напрямую в тесте), а отдельные regression-тесты используют
+  настоящий `openai==2.53.0` с HTTP-ответами, подменёнными через `httpx.MockTransport`.
+  Ни один тест не обращается к внешней сети или реальному OpenAI API и не требует
+  переменной окружения `OPENAI_API_KEY`.
 
-Схема проверки и QC на этом этапе — это внутренний, полностью протестированный слой,
-не подключённый ни к одному эндпоинту: запустить настоящую ИИ-проверку через API пока
-нельзя.
+Схема проверки, QC и клиент OpenAI на этом этапе — это внутренний, полностью
+протестированный слой, не подключённый ни к одному эндпоинту: запустить настоящую
+ИИ-проверку через API пока нельзя.
 
 **Ещё не реализовано на этом этапе** (сознательно вне рамок текущего этапа):
 
-- клиент OpenAI и запуск LLM;
 - эндпоинты запуска ИИ-проверки — `POST /api/documents/{document_id}/review` и
   `POST /api/ai/review`;
+- orchestration `ModelReviewDraft → QC → FinalReview` (вызов LLM-клиента и QC-сервиса
+  из одного пайплайна);
 - workflow сохранения проверок, сгенерированных реальным ИИ-прогоном;
+- audit для ИИ-операций (`document.review`, `ai.review`);
 - экспорт проверки в JSON (`GET /api/reviews/{review_id}/export`);
 - фронтенд;
 - Docker.
@@ -62,6 +84,12 @@ backend/
     repositories/     операции персистентности для каждой таблицы
     services/         document_service (атомарное создание + аудит), audit_service
                       (инвариант), review_qc (детерминированный QC и фабрика отката)
+    llm/              клиент OpenAI Structured Outputs: client.py (OpenAIReviewClient,
+                      метод review(document_text) -> ModelReviewDraft), errors.py
+                      (типизированные ошибки LLMConfigurationError/LLMProviderError/
+                      LLMAPIError/LLMTransportError/LLMInvalidJSONError/
+                      LLMSchemaMismatchError), prompts.py (системный prompt на русском,
+                      PROMPT_VERSION, REVIEW_SCHEMA_VERSION)
     utils/            utc_now_iso(), JSONText (сериализация JSON-колонок), нормализация
                       текста и правило "слишком расплывчато" (text.py)
   tests/              conftest.py, helpers.py и тестовые модули
@@ -89,14 +117,17 @@ pip install -r requirements.txt
 cp ../.env.example ../.env
 ```
 
-На этом этапе `OPENAI_API_KEY` не требуется для запуска приложения.
+`OPENAI_API_KEY` не требуется для запуска приложения и не требуется для тестов: ни один
+эндпоинт пока не вызывает клиент OpenAI, а тесты `app/llm/` либо используют
+инжектируемый fake-клиент, либо настоящий SDK с HTTP-ответами, подменёнными через
+`httpx.MockTransport` — в обоих случаях без обращения к реальному OpenAI API.
 
 ### Переменные окружения (`.env.example`)
 
 | Переменная | Назначение |
 | --- | --- |
-| `OPENAI_API_KEY` | ключ OpenAI; не используется на текущем этапе |
-| `OPENAI_MODEL` | название модели OpenAI; не используется на текущем этапе |
+| `OPENAI_API_KEY` | ключ OpenAI; читается `OpenAIReviewClient`, но пока не вызывается ни одним эндпоинтом |
+| `OPENAI_MODEL` | название модели OpenAI; читается `OpenAIReviewClient`, но пока не вызывается ни одним эндпоинтом |
 | `DATABASE_URL` | строка подключения к SQLite, по умолчанию `sqlite:///./data/app.db` |
 | `BACKEND_CORS_ORIGINS` | разрешённые origin'ы для CORS (без `*`) |
 
@@ -133,4 +164,9 @@ pytest
 ```
 
 Тесты выполняются на изолированной временной базе SQLite и не используют
-`backend/data/app.db` и не обращаются к внешним сервисам.
+`backend/data/app.db` и не обращаются к внешним сервисам. В частности, тесты
+`tests/test_llm_client.py` и `tests/test_llm_prompts.py` не выполняют ни одного
+реального HTTP-запроса к OpenAI: большинство используют инжектируемый fake-объект (или
+ошибки SDK, поднятые напрямую в тесте), а несколько offline regression-тестов используют
+настоящий `openai==2.53.0` с `httpx.MockTransport` вместо реальной сети. Ни один из
+этих путей не требует `OPENAI_API_KEY` ни для запуска тестов, ни для CI.
