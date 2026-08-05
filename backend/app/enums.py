@@ -61,3 +61,21 @@ class ReviewReasonCode(str, Enum):
     INVALID_JSON = "INVALID_JSON"
     SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
     MODEL_ERROR = "MODEL_ERROR"
+
+
+class LLMErrorCategory(str, Enum):
+    """Safe, stable technical categories for a typed `app.llm.errors.LLMClientError`
+    failure, used as review-orchestration result metadata for a later audit layer.
+
+    Maps 1:1 onto the `LLMClientError` subclasses in `app/llm/errors.py`. Never
+    derived from `type(exc).__name__`, an exception message, or model output.
+    Distinct from `ReviewReasonCode`: never written into
+    `FinalReview.review_reason_codes`.
+    """
+
+    CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+    TRANSPORT_ERROR = "TRANSPORT_ERROR"
+    API_ERROR = "API_ERROR"
+    INVALID_JSON = "INVALID_JSON"
+    SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
+    PROVIDER_ERROR = "PROVIDER_ERROR"

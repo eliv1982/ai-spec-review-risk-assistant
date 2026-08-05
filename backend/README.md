@@ -49,19 +49,35 @@
   (или ошибки SDK, поднятые напрямую в тесте), а отдельные regression-тесты используют
   настоящий `openai==2.53.0` с HTTP-ответами, подменёнными через `httpx.MockTransport`.
   Ни один тест не обращается к внешней сети или реальному OpenAI API и не требует
-  переменной окружения `OPENAI_API_KEY`.
+  переменной окружения `OPENAI_API_KEY`;
+- слой review orchestration (`app/services/review_orchestrator.py`, класс
+  `ReviewOrchestrator` с внедряемым через конструктор LLM-клиентом): связывает уже
+  готовые компоненты в единый пайплайн `document_text → LLM-клиент → ModelReviewDraft →
+  детерминированный QC → FinalReview`. Happy path — успешный вызов LLM-клиента, затем
+  `build_final_review`. Fallback path перехватывает только типизированный
+  `LLMClientError`, классифицирует его в закрытый enum `LLMErrorCategory`
+  (`app/enums.py`) и строит `FinalReview` через уже существующую безопасную фабрику
+  отката `build_fallback_review` — без второго вызова LLM, без ручной сборки
+  `FinalReview` и без изменения детерминированных правил QC/fallback. Любое иное
+  исключение (программная ошибка, сбой внутри QC или фабрики отката,
+  `KeyboardInterrupt`, `SystemExit`) не перехватывается и распространяется наружу как
+  есть. Результат — строгая Pydantic-модель `ReviewOrchestrationResult`
+  (`final_review`, `used_fallback`, `llm_error_category`) для будущего
+  persistence/audit-слоя; она не содержит исходное исключение, текст ошибки, ответ
+  провайдера, секреты или полный текст документа, а `llm_error_category` никогда не
+  попадает в `FinalReview.review_reason_codes`. Тесты (`tests/test_review_orchestrator.py`)
+  полностью офлайн и используют только инжектируемый fake-клиент.
 
-Схема проверки, QC и клиент OpenAI на этом этапе — это внутренний, полностью
-протестированный слой, не подключённый ни к одному эндпоинту: запустить настоящую
-ИИ-проверку через API пока нельзя.
+Схема проверки, QC, клиент OpenAI и слой orchestration на этом этапе — это внутренний,
+полностью протестированный слой, не подключённый ни к одному эндпоинту: запустить
+настоящую ИИ-проверку через API пока нельзя.
 
 **Ещё не реализовано на этом этапе** (сознательно вне рамок текущего этапа):
 
 - эндпоинты запуска ИИ-проверки — `POST /api/documents/{document_id}/review` и
   `POST /api/ai/review`;
-- orchestration `ModelReviewDraft → QC → FinalReview` (вызов LLM-клиента и QC-сервиса
-  из одного пайплайна);
-- workflow сохранения проверок, сгенерированных реальным ИИ-прогоном;
+- workflow сохранения проверок, сгенерированных реальным ИИ-прогоном (persistence,
+  репозитории, транзакции);
 - audit для ИИ-операций (`document.review`, `ai.review`);
 - экспорт проверки в JSON (`GET /api/reviews/{review_id}/export`);
 - фронтенд;
@@ -76,14 +92,16 @@ backend/
     config.py         настройки (pydantic-settings): переменные окружения + .env
     database.py       engine/session, PRAGMA foreign_keys=ON, init_db, get_db
     enums.py          DocumentStatus, ReviewConfidence, ReviewReadiness, AuditStatus,
-                      RiskSeverity, RiskCategory, ReviewReasonCode
+                      RiskSeverity, RiskCategory, ReviewReasonCode, LLMErrorCategory
     models.py         модели SQLAlchemy: Document, Review, AuditRun
     api/              роутеры: health, documents, reviews, audit_runs
     schemas/          Pydantic-схемы запросов/ответов, обёртка пагинации, строгие
                       ModelReviewDraft / FinalReview и вложенные схемы (review.py)
     repositories/     операции персистентности для каждой таблицы
     services/         document_service (атомарное создание + аудит), audit_service
-                      (инвариант), review_qc (детерминированный QC и фабрика отката)
+                      (инвариант), review_qc (детерминированный QC и фабрика отката),
+                      review_orchestrator (ReviewOrchestrator: LLM-клиент → QC →
+                      FinalReview, с fallback-путём при LLMClientError)
     llm/              клиент OpenAI Structured Outputs: client.py (OpenAIReviewClient,
                       метод review(document_text) -> ModelReviewDraft), errors.py
                       (типизированные ошибки LLMConfigurationError/LLMProviderError/
