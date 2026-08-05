@@ -4,12 +4,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_review_workflow
 from app.database import get_db
 from app.enums import DocumentStatus
 from app.repositories.document_repository import DocumentRepository
+from app.repositories.review_repository import ReviewRepository
 from app.schemas.common import PaginatedResponse
 from app.schemas.document import DocumentCreate, DocumentResponse
+from app.schemas.review import ReviewResponse
 from app.services.document_service import DocumentService
+from app.services.review_workflow import DocumentNotFoundError, ReviewWorkflow
 
 router = APIRouter()
 
@@ -49,3 +53,32 @@ def get_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentRe
     if document is None:
         raise HTTPException(status_code=404, detail="Документ не найден")
     return DocumentResponse.model_validate(document)
+
+
+@router.post(
+    "/{document_id}/review",
+    response_model=ReviewResponse,
+    status_code=201,
+    summary="Запустить и сохранить проверку документа",
+    description=(
+        "Запускает проверку уже сохранённого документа и атомарно сохраняет Review и "
+        "AuditRun. Безопасный резервный результат (safe fallback) возвращается как "
+        "обычный успешный ответ с needs_review=true — ручная проверка, а не ошибка."
+    ),
+)
+def review_document(
+    document_id: UUID,
+    db: Session = Depends(get_db),
+    workflow: ReviewWorkflow = Depends(get_review_workflow),
+) -> ReviewResponse:
+    try:
+        result = workflow.run(document_id)
+    except DocumentNotFoundError:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Не удалось выполнить проверку документа.")
+
+    review = ReviewRepository(db).get_by_id(str(result.review_id))
+    return ReviewResponse.from_model(review)

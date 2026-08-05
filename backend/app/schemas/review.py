@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from app.enums import (
     ReviewConfidence,
@@ -153,4 +153,93 @@ class ReviewResponse(BaseModel):
             needs_review=bool(review.needs_review),
             reason_codes=review.reason_codes_json,
             error=review.error,
+        )
+
+
+def _drop_default(schema: Dict[str, Any]) -> None:
+    """`json_schema_extra` hook for `AIReviewRequest.title`: removes the stray
+    `"default": null` Pydantic would otherwise publish for a `str`-typed field
+    whose Python default is `None`. Mutates only the schema dict generated for
+    this one field; never touches runtime validation."""
+    schema.pop("default", None)
+
+
+class AIReviewRequest(BaseModel):
+    """Request body for `POST /api/ai/review` (API_CONTRACTS.md).
+
+    Stateless: `title` is an optional audit-context label only and is never
+    persisted as a `Document`. `text` is passed verbatim (after trim) to
+    `ReviewOrchestrator.review()`.
+
+    `title` may be omitted entirely (defaults to `None`), but an explicit JSON
+    `null` is rejected with a 422: a caller that wants "no title" must omit the
+    key, not send `null`. Declaring the field as plain `str` (not `Optional[str]`)
+    with a `None` default keeps the OpenAPI schema showing `{"type": "string"}`
+    instead of a `string | null` union — the field still isn't in `required`, so
+    omission remains valid — while the `mode="before"` validator below rejects an
+    explicit `null` with a Russian message before Pydantic's own (English) type
+    check would otherwise fire.
+
+    A bare `Field(default=None)` would still publish `"default": null` in the
+    OpenAPI schema for this field, which a generated client could read as
+    license to send `null` even though runtime rejects it. `json_schema_extra`
+    as a callable (Pydantic v2) runs only for this field's generated schema
+    dict and only at schema-build time — never at validation time — so it can
+    drop that stray `"default": null` without touching the field's actual
+    runtime default or any other model's schema.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(default=None, json_schema_extra=_drop_default)
+    text: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_title(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "title" in data and data["title"] is None:
+            raise ValueError(
+                "title не может быть null; чтобы не указывать заголовок, опустите поле полностью"
+            )
+        return data
+
+    @field_validator("title", mode="after")
+    @classmethod
+    def _validate_title(cls, value: Optional[str]) -> Optional[str]:
+        return value if value is None else _require_trimmed(value)
+
+    @field_validator("text", mode="after")
+    @classmethod
+    def _validate_text(cls, value: str) -> str:
+        return _require_trimmed(value)
+
+
+class AIReviewResponse(BaseModel):
+    """Response body for `POST /api/ai/review` (API_CONTRACTS.md).
+
+    Exposes a backend-produced `FinalReview` via `review_json` plus the same
+    denormalized top-level fields as a persisted review response, never the raw
+    `ModelReviewDraft` and never `model_needs_review`. Unlike `ReviewResponse`,
+    carries no `id`/`created_at`/`document_id`: nothing is persisted as a
+    `Document` or `Review` row for this stateless endpoint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_json: Dict[str, Any]
+    confidence: ReviewConfidence
+    readiness: ReviewReadiness
+    needs_review: bool
+    reason_codes: List[str]
+    error: Optional[str] = None
+
+    @classmethod
+    def from_final_review(cls, final_review: FinalReview) -> "AIReviewResponse":
+        return cls(
+            review_json=final_review.model_dump(mode="json"),
+            confidence=final_review.confidence,
+            readiness=final_review.document_readiness,
+            needs_review=final_review.needs_review,
+            reason_codes=[code.value for code in final_review.review_reason_codes],
+            error=None,
         )

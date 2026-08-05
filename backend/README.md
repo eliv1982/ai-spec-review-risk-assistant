@@ -109,17 +109,89 @@
   session после закрытия и после сбоя error-audit, повторных запусков и
   `KeyboardInterrupt`/`SystemExit`.
 
-Схема проверки, QC, клиент OpenAI, слой orchestration и workflow сохранения на этом
-этапе — это внутренний, полностью протестированный слой, не подключённый ни к одному
-эндпоинту: запустить настоящую ИИ-проверку через API пока нельзя.
+На этом этапе оба эндпоинта запуска ИИ-проверки открыты через FastAPI поверх уже
+готовых application-слоёв (`ReviewOrchestrator`, `ReviewWorkflow`), без дублирования
+orchestration/QC/fallback/persistence в роутере:
+
+- `POST /api/documents/{document_id}/review` — тонкий роутер вызывает
+  `ReviewWorkflow.run(document_id)` (внедряется через FastAPI-зависимость
+  `app/api/deps.py::get_review_workflow`), которая сама грузит документ, один раз
+  вызывает orchestrator и атомарно сохраняет `Review` + `AuditRun`. Роутер только
+  мапит `DocumentNotFoundError → 404` (безопасное русскоязычное сообщение, без
+  раскрытия структуры БД) и любую иную ошибку → `500` с фиксированным сообщением
+  (без `str(exc)`, трассировки, текста документа или ответа провайдера); после
+  успеха читает уже закоммиченную строку `Review` по `review_id` из
+  `PersistedReviewResult` и возвращает её через существующую схему
+  `ReviewResponse` (`id`, `created_at`, `document_id`, `review_json`, `confidence`,
+  `readiness`, `needs_review`, `reason_codes`, `error`) с кодом `201` — той же
+  формы и с тем же кодом, что задокументированы в `../docs/API_CONTRACTS.md`.
+  Безопасный LLM-fallback, который `ReviewWorkflow` уже превратил в пригодный к
+  сохранению `FinalReview`, возвращается обычным успешным `201`-ответом
+  (`needs_review=true`), а не HTTP-ошибкой. Duplicate error-audit невозможен:
+  единственную `AuditRun(status="error")`-строку для непредвиденного сбоя пишет
+  сам `ReviewWorkflow` до повторного выброса исключения, роутер второй раз audit
+  не создаёт.
+- `POST /api/ai/review` — stateless демонстрационная проверка текста без создания
+  `Document`/`Review`: роутер валидирует `AIReviewRequest` (`title` — необязательная
+  audit-метка: поле можно опустить, но явный JSON `null` отклоняется `422`, а
+  непустая строка триммится; `text` — обязательное непустое после trim поле;
+  `extra="forbid"`) и вызывает небольшой сервис
+  `app/services/ai_review_service.py::AIReviewService` (внедряется через
+  `get_ai_review_service`), который один раз вызывает тот же `ReviewOrchestrator` и
+  пишет ровно одну строку `audit_runs` (`action="ai.review"`, `entity_type=None`,
+  `entity_id=None`) — `documents`/`reviews` не создаются и не меняются. Ответ — схема
+  `AIReviewResponse` (`review_json`, `confidence`, `readiness`, `needs_review`,
+  `reason_codes`, `error`) с кодом `200`, без `id`, `created_at` и `document_id`,
+  поскольку ничего не сохраняется. `AuditRun.input_json` хранит `prompt_version`,
+  `review_schema_version`, `title_length`/`text_length` (никогда полный текст) и
+  настроенное имя модели (`model`, из `Settings.openai_model` через
+  `get_configured_model_name`, а не из приватного поля SDK-клиента); `output_json` —
+  `used_fallback`, `llm_error_category`, итоговые `needs_review` и упорядоченные
+  `review_reason_codes` (`.value`). `AIReviewService.review()` оборачивает вызов
+  orchestrator и обычную audit-транзакцию единой recovery-границей: любая
+  непредвиденная `Exception` (не `LLMClientError` — тот уже обработан оркестратором,
+  и не `BaseException`/`KeyboardInterrupt`/`SystemExit`/`GeneratorExit`) откатывает
+  основную транзакцию и пишет ровно одну отдельную
+  `AuditRun(action="ai.review", status="error")` с фиксированным безопасным русским
+  сообщением (без `str(exc)`, текста документа, заголовка или ответа провайдера); если
+  сама recovery-запись падает — откатывается и она, а наружу пробрасывается
+  исходное исключение без изменений. После любого исхода `session.in_transaction()
+  is False` и `session.is_active is True`.
+- Оба роутера (`documents.py`, `ai_review.py`) явно пробрасывают `HTTPException`
+  (`except HTTPException: raise`) до общего `except Exception: → 500`, чтобы код
+  вроде `409`, поднятый на уровне dependency/service, не подменялся общим `500`.
+  Обе review-операции документированы в OpenAPI (`summary` и русскоязычный
+  `description`).
+- Dependency wiring (`app/api/deps.py`): `get_review_client` создаёт
+  `OpenAIReviewClient()` без обращения к сети и без чтения `OPENAI_API_KEY` в момент
+  конструирования (реальный SDK-клиент создаётся лениво только внутри
+  `OpenAIReviewClient.review()`), поэтому отсутствующий `OPENAI_API_KEY` не ломает
+  ни импорт приложения, ни `/health`, ни пути `404`/`422`. `get_review_orchestrator`,
+  `get_review_workflow` и `get_ai_review_service` строятся поверх него через
+  `Depends(...)`; `get_configured_model_name` читает `Settings.openai_model` (уже
+  закэшированные через `lru_cache`, без нового SDK-клиента) и нормализует пустое
+  значение в `None`. Каждая зависимость независимо переопределяется в тестах через
+  `app.dependency_overrides` — без реального API key, клиента OpenAI или сети.
+- Тесты — `tests/test_review_api.py`, полностью офлайн (`TestClient` + временная
+  SQLite): успешная проверка документа, `needs_review` без fallback, safe fallback
+  как обычный `201`, отсутствующий документ → `404`, невалидный UUID → `422`,
+  фатальная ошибка workflow → `500` без утечки секретов и без duplicate audit,
+  stateless AI-проверка (успех/fallback/валидация запроса), полный snapshot
+  `ai.review`-аудита для success/needs_review/fallback, recovery-audit контракт
+  `AIReviewService` (обычный audit-commit fails, recovery-audit fails с реальным
+  `IntegrityError`, `KeyboardInterrupt`/`SystemExit`/`GeneratorExit` не создают
+  audit), `HTTPException` не подменяется общим `500`, отклонение явного
+  `title: null`, отсутствие `OPENAI_API_KEY` при импорте и на путях `404`/`422`,
+  безопасность OpenAPI-схемы,
+  а также отдельные wiring-тесты, которые поднимают настоящие
+  `ReviewOrchestrator`/`ReviewWorkflow`/`AIReviewService` и подменяют только
+  LLM-клиент на границе сети.
 
 **Ещё не реализовано на этом этапе** (сознательно вне рамок текущего этапа):
 
-- эндпоинты запуска ИИ-проверки — `POST /api/documents/{document_id}/review` и
-  `POST /api/ai/review`;
-- audit для эндпоинта `POST /api/ai/review` (`ai.review`);
 - изменение `Document.status` по итогам проверки (например, переход в `reviewed`/
-  `review_failed`) — вне рамок текущего этапа;
+  `review_failed`) — вне рамок текущего этапа (эту границу устанавливает сам
+  `ReviewWorkflow`, не роутер);
 - экспорт проверки в JSON (`GET /api/reviews/{review_id}/export`);
 - фронтенд;
 - Docker.
@@ -135,16 +207,24 @@ backend/
     enums.py          DocumentStatus, ReviewConfidence, ReviewReadiness, AuditStatus,
                       RiskSeverity, RiskCategory, ReviewReasonCode, LLMErrorCategory
     models.py         модели SQLAlchemy: Document, Review, AuditRun
-    api/              роутеры: health, documents, reviews, audit_runs
+    api/              роутеры: health, documents (включая POST .../review),
+                      reviews, audit_runs, ai_review (POST /api/ai/review);
+                      deps.py — FastAPI dependency factories (get_review_client,
+                      get_review_orchestrator, get_review_workflow,
+                      get_ai_review_service), каждая переопределима через
+                      app.dependency_overrides в тестах
     schemas/          Pydantic-схемы запросов/ответов, обёртка пагинации, строгие
-                      ModelReviewDraft / FinalReview и вложенные схемы (review.py)
+                      ModelReviewDraft / FinalReview и вложенные схемы, а также
+                      ReviewResponse, AIReviewRequest, AIReviewResponse (review.py)
     repositories/     операции персистентности для каждой таблицы
     services/         document_service (атомарное создание + аудит), audit_service
                       (инвариант), review_qc (детерминированный QC и фабрика отката),
                       review_orchestrator (ReviewOrchestrator: LLM-клиент → QC →
                       FinalReview, с fallback-путём при LLMClientError),
                       review_workflow (ReviewWorkflow: атомарное сохранение Review +
-                      AuditRun для существующего документа, PersistedReviewResult)
+                      AuditRun для существующего документа, PersistedReviewResult),
+                      ai_review_service (AIReviewService: тот же orchestrator без
+                      persistence Document/Review, только audit_runs для ai.review)
     llm/              клиент OpenAI Structured Outputs: client.py (OpenAIReviewClient,
                       метод review(document_text) -> ModelReviewDraft), errors.py
                       (типизированные ошибки LLMConfigurationError/LLMProviderError/
@@ -209,9 +289,15 @@ API обслуживается под префиксом `/api`, наприме�
 - `POST /api/documents` — создание документа (атомарно с записью аудита).
 - `GET /api/documents` — список документов с фильтром `status`, пагинацией и сортировкой.
 - `GET /api/documents/{document_id}` — получение документа по идентификатору.
+- `POST /api/documents/{document_id}/review` — запустить проверку существующего
+  документа и сохранить `Review` + `AuditRun` (`201`); отсутствующий документ →
+  `404`; безопасный LLM-fallback возвращается обычным `201` с `needs_review=true`.
 - `GET /api/reviews` — список сохранённых проверок с фильтрами `document_id`,
   `needs_review`, `confidence`, `readiness`, пагинацией и сортировкой.
 - `GET /api/reviews/{review_id}` — получение проверки по идентификатору.
+- `POST /api/ai/review` — stateless демонстрационная проверка переданного текста
+  (`200`), без создания `Document`/`Review`; создаётся только строка `audit_runs`
+  (`action="ai.review"`).
 - `GET /api/audit-runs` — список записей аудита с фильтрами `status`, `action`,
   `errors_only`, пагинацией и сортировкой.
 - `GET /api/audit-runs/{audit_run_id}` — получение записи аудита по идентификатору.
@@ -231,3 +317,9 @@ pytest
 ошибки SDK, поднятые напрямую в тесте), а несколько offline regression-тестов используют
 настоящий `openai==2.53.0` с `httpx.MockTransport` вместо реальной сети. Ни один из
 этих путей не требует `OPENAI_API_KEY` ни для запуска тестов, ни для CI.
+
+`tests/test_review_api.py` — HTTP-тесты обоих review-эндпоинтов через `TestClient`:
+подменяют `get_review_orchestrator`/`get_review_client`/`get_ai_review_service` через
+`app.dependency_overrides`, включая отдельные wiring-тесты с настоящими
+`ReviewOrchestrator`/`ReviewWorkflow`/`AIReviewService` и fake LLM-клиентом на границе
+сети — без реального `OPENAI_API_KEY` и без обращения к OpenAI.
