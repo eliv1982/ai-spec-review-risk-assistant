@@ -67,18 +67,59 @@
   провайдера, секреты или полный текст документа, а `llm_error_category` никогда не
   попадает в `FinalReview.review_reason_codes`. Тесты (`tests/test_review_orchestrator.py`)
   полностью офлайн и используют только инжектируемый fake-клиент.
+- workflow сохранения проверки и аудита (`app/services/review_workflow.py`, класс
+  `ReviewWorkflow` с внедряемыми через конструктор `Session` и orchestrator'ом по
+  минимальному `Protocol`): для существующего документа один раз вызывает orchestrator,
+  затем атомарно сохраняет `Review` и `AuditRun` в одной транзакции. Граница транзакций
+  соблюдается строго: после чтения документа его id/text копируются в локальные
+  Python-значения, read-only autobegin-транзакция закрывается (`session.rollback()`), и
+  только после этого вызывается orchestrator — во время вызова `session.in_transaction()
+  is False`. Короткая write-транзакция открывается только для повторной проверки
+  документа (на случай удаления между чтением и записью — тогда бросается
+  `DocumentNotFoundError` без audit-записи, это не сбой попытки проверки, а её
+  отсутствие) и записи `Review` + `AuditRun`; все значения для результата читаются после
+  `flush()`, но до `commit()`, поэтому post-commit `refresh()` не нужен и после любого
+  пути возврата `session.in_transaction() is False`. Перед любой записью в БД результат
+  orchestrator'а проверяется на внутреннюю согласованность: `used_fallback=True` без
+  `final_review.needs_review=True` отклоняется как `InvalidReviewWorkflowResultError` до
+  создания `Review`/`AuditRun` — стандартный `ReviewOrchestrator` такого не производит, но
+  ничего не мешает нестандартной injected-реализации. Аудит-`status` определяется
+  исключительно по итоговому `FinalReview.needs_review` (`False → success`,
+  `True → needs_review`); безопасный LLM-fallback, давший пригодный к сохранению
+  `FinalReview`, тоже сохраняется как `needs_review` с `error=null` — это не техническая
+  ошибка аудита. `prompt_version`/`review_schema_version` (константы из
+  `app/llm/prompts.py`) и метаданные `used_fallback`/`llm_error_category` попадают в
+  `input_json`/`output_json` записи аудита, а не в `FinalReview`. Любая непредвиденная
+  ошибка (не безопасный LLM-fallback и не отсутствующий документ, а сбой в
+  orchestrator/QC/персистентности или невалидный orchestration result) откатывает
+  незавершённую транзакцию, пишет отдельную `AuditRun(status="error")` с фиксированным
+  нечувствительным сообщением (без `str(exc)`, трассировки, текста документа или ответа
+  провайдера) на сущности `document`, а затем исходное исключение пробрасывается наружу
+  без изменений; `KeyboardInterrupt`/`SystemExit`/`GeneratorExit` никогда не перехватываются.
+  Результат — неизменяемая (`frozen`) Pydantic-модель `PersistedReviewResult` с расширенным
+  набором инвариантов (`used_fallback`/`audit_status`/`final_review.needs_review` должны
+  быть согласованы), а вложенный `final_review` — это `PersistedFinalReviewSnapshot`
+  (frozen-подкласс `FinalReview`, локальный для этого модуля), так что
+  `result.final_review.needs_review = ...` отклоняется как обычная mutation
+  frozen-Pydantic-модели, а не только переприсваивание самого поля `final_review`.
+  `Document.status` этот слой не меняет — такой переход этим этапом не утверждён.
+  Тесты (`tests/test_review_workflow.py`) полностью офлайн, используют инжектируемый
+  fake-orchestrator и изолированную временную базу SQLite, включая проверки границы
+  транзакций, невалидного fallback-результата, неизменяемости snapshot'а, состояния
+  session после закрытия и после сбоя error-audit, повторных запусков и
+  `KeyboardInterrupt`/`SystemExit`.
 
-Схема проверки, QC, клиент OpenAI и слой orchestration на этом этапе — это внутренний,
-полностью протестированный слой, не подключённый ни к одному эндпоинту: запустить
-настоящую ИИ-проверку через API пока нельзя.
+Схема проверки, QC, клиент OpenAI, слой orchestration и workflow сохранения на этом
+этапе — это внутренний, полностью протестированный слой, не подключённый ни к одному
+эндпоинту: запустить настоящую ИИ-проверку через API пока нельзя.
 
 **Ещё не реализовано на этом этапе** (сознательно вне рамок текущего этапа):
 
 - эндпоинты запуска ИИ-проверки — `POST /api/documents/{document_id}/review` и
   `POST /api/ai/review`;
-- workflow сохранения проверок, сгенерированных реальным ИИ-прогоном (persistence,
-  репозитории, транзакции);
-- audit для ИИ-операций (`document.review`, `ai.review`);
+- audit для эндпоинта `POST /api/ai/review` (`ai.review`);
+- изменение `Document.status` по итогам проверки (например, переход в `reviewed`/
+  `review_failed`) — вне рамок текущего этапа;
 - экспорт проверки в JSON (`GET /api/reviews/{review_id}/export`);
 - фронтенд;
 - Docker.
@@ -101,7 +142,9 @@ backend/
     services/         document_service (атомарное создание + аудит), audit_service
                       (инвариант), review_qc (детерминированный QC и фабрика отката),
                       review_orchestrator (ReviewOrchestrator: LLM-клиент → QC →
-                      FinalReview, с fallback-путём при LLMClientError)
+                      FinalReview, с fallback-путём при LLMClientError),
+                      review_workflow (ReviewWorkflow: атомарное сохранение Review +
+                      AuditRun для существующего документа, PersistedReviewResult)
     llm/              клиент OpenAI Structured Outputs: client.py (OpenAIReviewClient,
                       метод review(document_text) -> ModelReviewDraft), errors.py
                       (типизированные ошибки LLMConfigurationError/LLMProviderError/
