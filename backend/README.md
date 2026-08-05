@@ -6,8 +6,10 @@
 
 ## Текущий этап
 
-Реализован только фундамент бэкенда: слой персистентности и все эндпоинты создания/чтения/
-списка, не связанные с ИИ. А именно:
+Реализован фундамент бэкенда (слой персистентности и все эндпоинты создания/чтения/
+списка, не связанные с ИИ), а также — на этом этапе — строгая схема проверки вместе с
+детерминированным контролем качества (QC). Всё это работает полностью без обращения к
+OpenAI и без доступа к сети. А именно:
 
 - приложение FastAPI со стартапом (`lifespan`) и созданием схемы базы данных;
 - модели SQLAlchemy для таблиц `documents`, `reviews`, `audit_runs`;
@@ -16,14 +18,29 @@
   фильтрацией, пагинацией и детерминированной сортировкой;
 - конфигурация через переменные окружения;
 - CORS, ограниченный списком настроенных origin'ов;
-- автоматические тесты на изолированной временной базе SQLite.
+- строгие Pydantic-схемы `ModelReviewDraft` и `FinalReview` (и вложенные `Risk`,
+  `MissingRequirement`, `Contradiction`) с запретом лишних полей, закрытыми
+  перечислениями и строгой валидацией строк и булевых значений;
+- детерминированный сервис контроля качества, который по проверенному
+  `ModelReviewDraft` строит `FinalReview`: флаг `needs_review` и коды причин
+  `review_reason_codes` формирует исключительно бэкенд — модель не предлагает и не
+  сохраняет ни одного кода причины;
+- безопасная фабрика отката (fallback) для типовых технических сбоев (`MODEL_ERROR`,
+  `INVALID_JSON`, `SCHEMA_MISMATCH`) — без выдуманных находок, с русскоязычным резюме
+  и одним безопасным уточняющим вопросом;
+- автоматические тесты на изолированной временной базе SQLite, включая обширные тесты
+  строгих схем, детерминированного QC и фабрики отката.
+
+Схема проверки и QC на этом этапе — это внутренний, полностью протестированный слой,
+не подключённый ни к одному эндпоинту: запустить настоящую ИИ-проверку через API пока
+нельзя.
 
 **Ещё не реализовано на этом этапе** (сознательно вне рамок текущего этапа):
 
 - клиент OpenAI и запуск LLM;
-- детерминированная проверка качества (QC) и построение `FinalReview`;
-- эндпоинт запуска проверки документа (`POST /api/documents/{document_id}/review`);
-- отдельный демонстрационный эндпоинт `POST /api/ai/review`;
+- эндпоинты запуска ИИ-проверки — `POST /api/documents/{document_id}/review` и
+  `POST /api/ai/review`;
+- workflow сохранения проверок, сгенерированных реальным ИИ-прогоном;
 - экспорт проверки в JSON (`GET /api/reviews/{review_id}/export`);
 - фронтенд;
 - Docker.
@@ -36,13 +53,17 @@ backend/
     main.py           приложение FastAPI, lifespan (init_db), CORS, обработчик 500-й ошибки
     config.py         настройки (pydantic-settings): переменные окружения + .env
     database.py       engine/session, PRAGMA foreign_keys=ON, init_db, get_db
-    enums.py          DocumentStatus, ReviewConfidence, ReviewReadiness, AuditStatus
+    enums.py          DocumentStatus, ReviewConfidence, ReviewReadiness, AuditStatus,
+                      RiskSeverity, RiskCategory, ReviewReasonCode
     models.py         модели SQLAlchemy: Document, Review, AuditRun
     api/              роутеры: health, documents, reviews, audit_runs
-    schemas/          Pydantic-схемы запросов/ответов и обёртка пагинации
+    schemas/          Pydantic-схемы запросов/ответов, обёртка пагинации, строгие
+                      ModelReviewDraft / FinalReview и вложенные схемы (review.py)
     repositories/     операции персистентности для каждой таблицы
-    services/         document_service (атомарное создание + аудит), audit_service (инвариант)
-    utils/            utc_now_iso(), JSONText (сериализация JSON-колонок)
+    services/         document_service (атомарное создание + аудит), audit_service
+                      (инвариант), review_qc (детерминированный QC и фабрика отката)
+    utils/            utc_now_iso(), JSONText (сериализация JSON-колонок), нормализация
+                      текста и правило "слишком расплывчато" (text.py)
   tests/              conftest.py, helpers.py и тестовые модули
   requirements.txt, pytest.ini, README.md
 ```
