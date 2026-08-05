@@ -33,6 +33,7 @@ pnpm-debug.log*
 dist/
 build/
 .vite/
+*.tsbuildinfo
 
 # SQLite databases
 *.db
