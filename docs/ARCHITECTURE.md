@@ -85,7 +85,7 @@ flowchart LR
 5. Raw model output is parsed and validated as `ModelReviewDraft` (additional properties forbidden; required strings validated after trim; no `needs_review` or `review_reason_codes` fields).
 6. On successful parse/validation, the quality-control service builds a backend-only **`FinalReview`**: content copied from the draft, `needs_review` and `review_reason_codes` written exclusively by the backend from `model_needs_review` and verified deterministic conditions.
 7. On model, transport, JSON, or schema failure, the system builds a safe `FinalReview` fallback (failure-provenance reason codes only; content-derived QC is not inferred from synthetic fallback fields).
-8. A usable `FinalReview` (from draft or fallback) is stored; document `status` becomes `reviewed`. Review, status update, and audit commit atomically. If no usable review can be stored, the failed review transaction rolls back and a recovery transaction sets `status=review_failed` and writes the error audit row.
+8. A `FinalReview` from a successfully parsed draft is stored; document `status` becomes `reviewed` (`Review.error=null`, audit `status="success"` or `"needs_review"`). A safe `FinalReview` fallback (a *technical* failure, safely contained) is also stored, but document `status` becomes `review_failed`, `Review.error` is a non-empty sanitized summary, and audit `status="error"` with the same non-empty sanitized `error` — a persisted fallback is never reported as `reviewed`. Review, status update, and audit commit atomically in both cases. If no usable review can be stored at all, the failed review transaction rolls back and a recovery transaction sets `status=review_failed` and writes the error audit row.
 9. Frontend shows the review; uncertain cases appear with `needs_review=true` and `reason_codes`. `model_needs_review` is never exposed.
 10. User may export the review as JSON (`GET /api/reviews/{review_id}/export`). Export writes its audit row before returning the response.
 
@@ -121,7 +121,7 @@ Owns schema for `documents`, `reviews`, and `audit_runs` only. Timestamps are st
 
 Creates and retrieves documents. Sets `DocumentStatus` transitions related to review outcomes (`created`, `reviewed`, `review_failed`). Does not call the LLM directly.
 
-`review_failed` means the **latest** document-backed review attempt failed before a usable review row was persisted. A later successful or fallback-persisted attempt may change the document back to `reviewed`.
+`review_failed` means the **latest** document-backed review attempt did not complete a trustworthy automated review: either a safe fallback review row was persisted after a technical failure (`Review.error` non-null), or no usable review row could be persisted at all. A later attempt updates the document's status again from its own outcome: `reviewed` on a genuine success, `review_failed` again on another fallback or failure.
 
 ### Review service
 
@@ -181,11 +181,13 @@ List and inspect `audit_runs`. Filter by `status`, `action`, and `errors_only` (
 | --- | --- |
 | `document.create` | Document row and audit row are committed atomically. |
 | Successful document-backed review (parsed model result) | Review row, document status update to `reviewed`, and audit row are committed atomically. |
-| Persisted safe fallback | Fallback review row, document status `reviewed`, and **error** audit row are committed atomically. |
-| No usable review can be stored | Roll back the failed review transaction. Use a **separate recovery transaction** to set `document.status="review_failed"` and write the error audit row (`entity_type="document"`, `entity_id=<document id>`). |
+| Persisted safe fallback | Fallback review row (`Review.error` non-null), document status **`review_failed`**, and **error** audit row (`audit_runs.error` non-null) are committed atomically. Still returned as HTTP `201`, never a `5xx`. |
+| No usable review can be stored | Roll back the failed review transaction. Use a **separate, best-effort recovery transaction** to set `document.status="review_failed"` and write the error audit row (`entity_type="document"`, `entity_id=<document id>`); the original failure is re-raised either way. |
 | Required audit cannot be stored | The audited action must not be reported as successful. |
 | `ai.review` | Write the audit row before returning a successful or fallback HTTP response. |
 | `review.export` | Write the audit row before returning the export response. |
+
+The recovery transaction above is **best-effort**, not a guarantee: if the underlying database is itself unavailable (or otherwise rejects the recovery write, including its own commit), the recovery `document.status`/error-audit write can itself fail. That secondary failure is swallowed so it never replaces or hides the original error — the original exception is always what propagates — but it means a repeat database failure at recovery time can leave `document.status` at its prior value with no error audit row for that attempt, rather than a guaranteed `review_failed` + audit trail.
 
 ## Failure handling
 
@@ -193,10 +195,10 @@ List and inspect `audit_runs`. Filter by `status`, `action`, and `errors_only` (
 | --- | --- |
 | Invalid request body / params / UUID | HTTP `422`; no domain mutation; no success audit |
 | Unknown document or review | HTTP `404` |
-| LLM API / transport failure | Safe fallback; `needs_review=true`; reason codes `["MODEL_ERROR"]` (+ `TOO_VAGUE_INPUT` if input independently fails vagueness thresholds); persist fallback and set document `reviewed` when possible; audit `status="error"` with non-empty sanitized `error` |
-| Invalid JSON | Safe fallback; reason codes `["INVALID_JSON"]` (+ optional `TOO_VAGUE_INPUT`); persist fallback and set `reviewed` when possible; audit `status="error"` with non-empty sanitized `error` |
-| Schema validation failure | Safe fallback; reason codes `["SCHEMA_MISMATCH"]` (+ optional `TOO_VAGUE_INPUT`); persist fallback and set `reviewed` when possible; audit `status="error"` with non-empty sanitized `error` |
-| Cannot persist usable review | Recovery transaction: document `status=review_failed` + audit `status="error"` with non-empty sanitized `error` on the document entity |
+| LLM API / transport failure | Safe fallback; `needs_review=true`; reason codes `["MODEL_ERROR"]` (+ `TOO_VAGUE_INPUT` if input independently fails vagueness thresholds); persist fallback with non-empty sanitized `Review.error` and set document `review_failed` when persistence succeeds; audit `status="error"` with non-empty sanitized `error` |
+| Invalid JSON | Safe fallback; reason codes `["INVALID_JSON"]` (+ optional `TOO_VAGUE_INPUT`); persist fallback with non-empty sanitized `Review.error` and set document `review_failed` when persistence succeeds; audit `status="error"` with non-empty sanitized `error` |
+| Schema validation failure | Safe fallback; reason codes `["SCHEMA_MISMATCH"]` (+ optional `TOO_VAGUE_INPUT`); persist fallback with non-empty sanitized `Review.error` and set document `review_failed` when persistence succeeds; audit `status="error"` with non-empty sanitized `error` |
+| Cannot persist usable review | Best-effort recovery transaction: document `status=review_failed` + audit `status="error"` with non-empty sanitized `error` on the document entity, when the recovery transaction itself succeeds; no `Review` row either way |
 | QC deterministic triggers on a successfully parsed `ModelReviewDraft` | Persist `FinalReview` with backend `needs_review=true` and deterministic `review_reason_codes`; document `reviewed`; audit `status="needs_review"` and `error=null` |
 | Validated draft with `model_needs_review=true` and no deterministic codes | Persist `FinalReview` with `needs_review=true` and `review_reason_codes=[]`; audit `status="needs_review"` and `error=null` |
 | Unexpected server error | HTTP `500`; audit `error` when the action was auditable; no invented review content |

@@ -32,7 +32,7 @@ from app.api.deps import (
     get_review_orchestrator,
     get_review_workflow,
 )
-from app.enums import LLMErrorCategory, ReviewReasonCode
+from app.enums import DocumentStatus, LLMErrorCategory, ReviewReasonCode
 from app.llm.errors import LLMTransportError
 from app.llm.prompts import PROMPT_VERSION, REVIEW_SCHEMA_VERSION
 from app.main import app
@@ -246,6 +246,16 @@ def test_document_review_success(client, db_session):
     assert audit.output_json["used_fallback"] is False
     assert audit.output_json["llm_error_category"] is None
 
+    # The HTTP request committed through a separate request-scoped `Session`;
+    # `expire_all()` forces this test session to re-read from the database
+    # instead of returning its own stale cached `Document` instance.
+    db_session.expire_all()
+    stored_document = db_session.get(Document, document.id)
+    assert stored_document.status == DocumentStatus.reviewed.value
+
+    document_response = client.get(f"/api/documents/{document.id}")
+    assert document_response.json()["status"] == "reviewed"
+
 
 def test_document_review_orchestrator_called_exactly_once_with_stored_text(client, db_session):
     document = make_document(db_session, text=NON_VAGUE_TEXT)
@@ -287,6 +297,14 @@ def test_document_review_needs_review_without_fallback(client, db_session):
     assert audit.error is None
     assert audit.output_json["used_fallback"] is False
 
+    # Manual review is not a technical error: the document is still `reviewed`.
+    # The HTTP request committed through a separate request-scoped `Session`;
+    # `expire_all()` forces this test session to re-read from the database
+    # instead of returning its own stale cached `Document` instance.
+    db_session.expire_all()
+    stored_document = db_session.get(Document, document.id)
+    assert stored_document.status == DocumentStatus.reviewed.value
+
 
 # ---------------------------------------------------------------------------
 # D. Safe fallback
@@ -302,6 +320,10 @@ def test_document_review_needs_review_without_fallback(client, db_session):
     ],
 )
 def test_document_review_safe_fallback_returns_normal_success_response(client, db_session, category, root_code):
+    """A persisted safe fallback is still returned as a normal `201` (never a
+    `5xx`/`502`), but — unlike a genuine successful review — carries a non-empty
+    `error`, is audited as `status="error"`, and moves the document to
+    `review_failed` (task section 3.C / API_CONTRACTS.md)."""
     document = make_document(db_session, text=NON_VAGUE_TEXT)
     fallback_review = build_fallback_review(original_text=NON_VAGUE_TEXT, root_reason_code=root_code)
     fake = _FakeOrchestrator(
@@ -315,13 +337,44 @@ def test_document_review_safe_fallback_returns_normal_success_response(client, d
     body = response.json()
     assert body["needs_review"] is True
     assert root_code.value in body["reason_codes"]
-    assert body["error"] is None
+    assert body["error"]
+    assert category.value in body["error"]
 
     audit = _document_review_audit(db_session, body["id"])
-    assert audit.status == "needs_review"
-    assert audit.error is None
+    assert audit.status == "error"
+    assert audit.error
+    assert category.value in audit.error
     assert audit.output_json["used_fallback"] is True
     assert audit.output_json["llm_error_category"] == category.value
+
+    # The HTTP request committed through a separate request-scoped `Session`;
+    # `expire_all()` forces this test session to re-read from the database
+    # instead of returning its own stale cached `Document` instance.
+    db_session.expire_all()
+    stored_document = db_session.get(Document, document.id)
+    assert stored_document.status == DocumentStatus.review_failed.value
+
+    # GET the persisted review back: the fallback's `error` and `needs_review`
+    # survive a fresh read, not just the original POST response.
+    review_get = client.get(f"/api/reviews/{body['id']}")
+    assert review_get.status_code == 200
+    review_body = review_get.json()
+    assert review_body["needs_review"] is True
+    assert review_body["error"]
+    assert category.value in review_body["error"]
+
+    # GET the audit log back filtered to errors: the fallback's audit row is
+    # discoverable through the same `errors_only=true` query the frontend audit
+    # journal uses.
+    audit_list = client.get("/api/audit-runs", params={"errors_only": "true"})
+    assert audit_list.status_code == 200
+    audit_ids = [item["id"] for item in audit_list.json()["items"]]
+    assert audit.id in audit_ids
+
+    # GET the document back: `review_failed` survives a fresh read too.
+    document_get = client.get(f"/api/documents/{document.id}")
+    assert document_get.status_code == 200
+    assert document_get.json()["status"] == "review_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +474,15 @@ def test_document_review_fatal_error_returns_500_without_leaking_secrets(client,
     haystack = str(audits[0].error) + str(audits[0].input_json) + str(audits[0].output_json)
     for secret in ("sk-test-secret", "Authorization: Bearer secret", "raw-provider-body", DANGEROUS_ERROR_TEXT):
         assert secret not in haystack
+
+    # No usable review could be stored: the recovery transaction still marks the
+    # document `review_failed`.
+    # The HTTP request committed through a separate request-scoped `Session`;
+    # `expire_all()` forces this test session to re-read from the database
+    # instead of returning its own stale cached `Document` instance.
+    db_session.expire_all()
+    stored_document = db_session.get(Document, document.id)
+    assert stored_document.status == DocumentStatus.review_failed.value
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +854,37 @@ def test_ai_review_openapi_has_nonempty_russian_description(client):
     assert _looks_non_ascii(description)
 
 
+def test_document_review_openapi_description_distinguishes_fallback_from_manual_review(client):
+    """Regression for the contract-reconciliation fix: the description previously
+    called the persisted safe fallback "ручная проверка, а не ошибка" ("manual
+    review, not an error"), contradicting its actual semantics
+    (`AuditRun.status="error"`, `Document.status="review_failed"`). It must now
+    state the technical-fallback semantics explicitly and keep them distinct from
+    an ordinary `needs_review=true` result that is not a technical failure. Checked
+    via a handful of key fragments rather than the full paragraph, so the test does
+    not become brittle to unrelated wording changes."""
+    schema = client.get("/openapi.json").json()
+    operation = schema["paths"]["/api/documents/{document_id}/review"]["post"]
+    description = operation.get("description")
+    assert description
+    assert _looks_non_ascii(description)
+
+    # The old, incorrect characterization of a technical fallback as "manual
+    # review, not an error" must be gone.
+    assert "ручная проверка, а не ошибка" not in description
+
+    # Technical fallback: still 201, but a real technical error, safely contained.
+    assert "техническая ошибка" in description
+    assert "AuditRun.status=error" in description
+    assert "Document.status=review_failed" in description
+    assert "Review.error" in description
+
+    # Ordinary needs_review=true (no technical fallback) is explicitly not an error.
+    assert "не ошибка" in description
+    assert "AuditRun.status=needs_review" in description
+    assert "Document.status=reviewed" in description
+
+
 # ---------------------------------------------------------------------------
 # 11. Stateless ai.review audit snapshot (MAJOR 2)
 #
@@ -1110,8 +1203,12 @@ def test_document_review_wiring_through_real_orchestrator_and_workflow(client, d
     assert stored_review.document_id == document.id
     assert stored_review.review_json["summary"] == draft.summary
 
+    # The HTTP request committed through a separate request-scoped `Session`;
+    # `expire_all()` forces this test session to re-read from the database
+    # instead of returning its own stale cached `Document` instance.
+    db_session.expire_all()
     stored_document = db_session.get(Document, document.id)
-    assert stored_document.status == "created"  # ReviewWorkflow does not change Document.status
+    assert stored_document.status == DocumentStatus.reviewed.value
 
     audit = _document_review_audit(db_session, body["id"])
     assert audit.status == "success"
@@ -1129,9 +1226,22 @@ def test_document_review_wiring_llm_failure_persists_safe_fallback(client, db_se
     body = response.json()
     assert body["needs_review"] is True
     assert "MODEL_ERROR" in body["reason_codes"]
+    assert body["error"]
 
     stored_review = db_session.get(Review, body["id"])
     assert stored_review is not None
+    assert stored_review.error
+
+    audit = _document_review_audit(db_session, body["id"])
+    assert audit.status == "error"
+    assert audit.error
+
+    # The HTTP request committed through a separate request-scoped `Session`;
+    # `expire_all()` forces this test session to re-read from the database
+    # instead of returning its own stale cached `Document` instance.
+    db_session.expire_all()
+    stored_document = db_session.get(Document, document.id)
+    assert stored_document.status == DocumentStatus.review_failed.value
 
 
 def test_ai_review_wiring_through_real_orchestrator(client, db_session):

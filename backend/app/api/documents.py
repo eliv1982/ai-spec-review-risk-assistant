@@ -62,8 +62,14 @@ def get_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentRe
     summary="Запустить и сохранить проверку документа",
     description=(
         "Запускает проверку уже сохранённого документа и атомарно сохраняет Review и "
-        "AuditRun. Безопасный резервный результат (safe fallback) возвращается как "
-        "обычный успешный ответ с needs_review=true — ручная проверка, а не ошибка."
+        "AuditRun. Обычная проверка с needs_review=true (без технического сбоя) — это "
+        "не ошибка: Review.error=null, AuditRun.status=needs_review, "
+        "Document.status=reviewed. Безопасный резервный результат (safe fallback), в "
+        "отличие от этого, — техническая ошибка модели/провайдера/парсера, безопасно "
+        "локализованная бэкендом: API всё равно возвращает 201, потому что "
+        "безопасный Review успешно сохранён, но needs_review=true, Review.error "
+        "заполнен непустым безопасным описанием категории сбоя, AuditRun.status=error "
+        "и Document.status=review_failed."
     ),
 )
 def review_document(

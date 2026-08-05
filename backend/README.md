@@ -83,30 +83,43 @@
   orchestrator'а проверяется на внутреннюю согласованность: `used_fallback=True` без
   `final_review.needs_review=True` отклоняется как `InvalidReviewWorkflowResultError` до
   создания `Review`/`AuditRun` — стандартный `ReviewOrchestrator` такого не производит, но
-  ничего не мешает нестандартной injected-реализации. Аудит-`status` определяется
-  исключительно по итоговому `FinalReview.needs_review` (`False → success`,
-  `True → needs_review`); безопасный LLM-fallback, давший пригодный к сохранению
-  `FinalReview`, тоже сохраняется как `needs_review` с `error=null` — это не техническая
-  ошибка аудита. `prompt_version`/`review_schema_version` (константы из
+  ничего не мешает нестандартной injected-реализации. Аудит-`status` и `Document.status`
+  определяются в первую очередь по `used_fallback`, и только затем — по
+  `FinalReview.needs_review` (docs/API_CONTRACTS.md, "Persistence and status outcomes";
+  docs/DATA_MODEL.md, "DocumentStatus"/"AuditStatus"): `used_fallback=True` → аудит
+  `status="error"` с непустым безопасным `error` (называет только закрытую категорию
+  `LLMErrorCategory`, никогда исходное исключение/сообщение/трассировку/ответ провайдера) и
+  `Document.status="review_failed"`; иначе — `False → success`, `True → needs_review`, и в
+  обоих случаях `Document.status="reviewed"` с `error=null`. Безопасный LLM-fallback — это
+  технический сбой, безопасно локализованный, а не успешный автоматический review: тот же
+  безопасный текст ошибки пишется и в `Review.error` (ранее — всегда `null`), и в
+  `audit_runs.error`. `needs_review=True` сам по себе никогда не считается техническим
+  сбоем — только `used_fallback`. `prompt_version`/`review_schema_version` (константы из
   `app/llm/prompts.py`) и метаданные `used_fallback`/`llm_error_category` попадают в
   `input_json`/`output_json` записи аудита, а не в `FinalReview`. Любая непредвиденная
   ошибка (не безопасный LLM-fallback и не отсутствующий документ, а сбой в
   orchestrator/QC/персистентности или невалидный orchestration result) откатывает
-  незавершённую транзакцию, пишет отдельную `AuditRun(status="error")` с фиксированным
-  нечувствительным сообщением (без `str(exc)`, трассировки, текста документа или ответа
-  провайдера) на сущности `document`, а затем исходное исключение пробрасывается наружу
-  без изменений; `KeyboardInterrupt`/`SystemExit`/`GeneratorExit` никогда не перехватываются.
-  Результат — неизменяемая (`frozen`) Pydantic-модель `PersistedReviewResult` с расширенным
-  набором инвариантов (`used_fallback`/`audit_status`/`final_review.needs_review` должны
-  быть согласованы), а вложенный `final_review` — это `PersistedFinalReviewSnapshot`
-  (frozen-подкласс `FinalReview`, локальный для этого модуля), так что
-  `result.final_review.needs_review = ...` отклоняется как обычная mutation
-  frozen-Pydantic-модели, а не только переприсваивание самого поля `final_review`.
-  `Document.status` этот слой не меняет — такой переход этим этапом не утверждён.
+  незавершённую транзакцию и в отдельной recovery-транзакции best-effort переводит
+  `Document.status="review_failed"` (пропускается, если документ уже не существует) и
+  пишет отдельную `AuditRun(status="error")` с фиксированным нечувствительным сообщением
+  (без `str(exc)`, трассировки, текста документа или ответа провайдера) на сущности
+  `document`, а затем исходное исключение пробрасывается наружу без изменений;
+  `KeyboardInterrupt`/`SystemExit`/`GeneratorExit` никогда не перехватываются. Если сама
+  recovery-запись падает, откат отменяет и попытку смены `Document.status` — частично
+  согласованное состояние никогда не остаётся. Результат — неизменяемая (`frozen`)
+  Pydantic-модель `PersistedReviewResult` с полем `review_error` (зеркалирует
+  `Review.error`) и расширенным набором инвариантов (`used_fallback`/`audit_status`/
+  `final_review.needs_review`/`review_error` должны быть согласованы: `used_fallback=True`
+  требует `audit_status="error"` и непустой `review_error`, иначе `audit_status` не может
+  быть `"error"`, а `review_error` должен быть `null`), а вложенный `final_review` — это
+  `PersistedFinalReviewSnapshot` (frozen-подкласс `FinalReview`, локальный для этого
+  модуля), так что `result.final_review.needs_review = ...` отклоняется как обычная
+  mutation frozen-Pydantic-модели, а не только переприсваивание самого поля `final_review`.
   Тесты (`tests/test_review_workflow.py`) полностью офлайн, используют инжектируемый
   fake-orchestrator и изолированную временную базу SQLite, включая проверки границы
   транзакций, невалидного fallback-результата, неизменяемости snapshot'а, состояния
-  session после закрытия и после сбоя error-audit, повторных запусков и
+  session после закрытия и после сбоя error-audit, повторных запусков (включая повторный
+  успешный запуск после `review_failed`, восстанавливающий `Document.status="reviewed"`) и
   `KeyboardInterrupt`/`SystemExit`.
 
 На этом этапе оба эндпоинта запуска ИИ-проверки открыты через FastAPI поверх уже
@@ -127,7 +140,9 @@ orchestration/QC/fallback/persistence в роутере:
   формы и с тем же кодом, что задокументированы в `../docs/API_CONTRACTS.md`.
   Безопасный LLM-fallback, который `ReviewWorkflow` уже превратил в пригодный к
   сохранению `FinalReview`, возвращается обычным успешным `201`-ответом
-  (`needs_review=true`), а не HTTP-ошибкой. Duplicate error-audit невозможен:
+  (`needs_review=true`, непустой `error` с безопасным описанием категории сбоя), а
+  не HTTP-ошибкой; сохранённый `Document.status` при этом — `review_failed`, а не
+  `reviewed` (см. `ReviewWorkflow` выше). Duplicate error-audit невозможен:
   единственную `AuditRun(status="error")`-строку для непредвиденного сбоя пишет
   сам `ReviewWorkflow` до повторного выброса исключения, роутер второй раз audit
   не создаёт.
@@ -187,13 +202,14 @@ orchestration/QC/fallback/persistence в роутере:
   `ReviewOrchestrator`/`ReviewWorkflow`/`AIReviewService` и подменяют только
   LLM-клиент на границе сети.
 
+Фронтенд (React + Vite, отдельный каталог `../frontend/`) уже реализован и включает
+создание документа, review dashboard, детальный просмотр проверки и журнал аудита;
+подробности — в корневом `../docs/ARCHITECTURE.md` ("Frontend sections"). Настоящий
+backend README документирует только сам бэкенд.
+
 **Ещё не реализовано на этом этапе** (сознательно вне рамок текущего этапа):
 
-- изменение `Document.status` по итогам проверки (например, переход в `reviewed`/
-  `review_failed`) — вне рамок текущего этапа (эту границу устанавливает сам
-  `ReviewWorkflow`, не роутер);
 - экспорт проверки в JSON (`GET /api/reviews/{review_id}/export`);
-- фронтенд;
 - Docker.
 
 ## Структура проекта

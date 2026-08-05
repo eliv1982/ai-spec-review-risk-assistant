@@ -288,14 +288,40 @@ Always:
 - do not invent extra questions beyond the single safe question above
 - do not add `LOW_CONFIDENCE`, `MISSING_ACCEPTANCE_CRITERIA`, `INSUFFICIENT_QUESTIONS`, or `CONTRADICTORY_INPUT` from synthetic fallback fields
 
-Technical fallback audits remain:
+### Persisted technical fallback
 
-```text
-status = "error"
-error = non-empty sanitized error summary
-```
+When a safe fallback `FinalReview` (above) is successfully persisted for a
+document-backed review:
 
-Persisted fallbacks set document status to `reviewed` when the fallback `FinalReview` row is stored. See [ARCHITECTURE.md](ARCHITECTURE.md) and [API_CONTRACTS.md](API_CONTRACTS.md).
+- `Review` is stored (not skipped);
+- `review_json` contains the valid safe fallback `FinalReview` shown above;
+- `Review.needs_review = true`;
+- `Review.error` is a non-empty, sanitized string (never `null`, never the raw
+  exception/message/traceback/provider payload — only the closed `LLMErrorCategory`
+  value);
+- `AuditRun.status = "error"`;
+- `AuditRun.error` is the same non-empty, sanitized string;
+- `Document.status = "review_failed"` — **not** `reviewed`: a persisted fallback is a
+  technical failure that was safely contained, not a completed automated review;
+- the endpoint still returns HTTP `201`, because a usable `Review` row was in fact
+  saved.
+
+### Successful manual review (not a technical fallback)
+
+Kept distinct from the above: a successfully parsed and validated `ModelReviewDraft`
+that the backend flags for manual attention (deterministic codes and/or
+`model_needs_review=true`, "model_needs_review without deterministic codes" above)
+is **not** a technical failure:
+
+- `needs_review = true`;
+- `Review.error = null`;
+- `AuditRun.status = "needs_review"`;
+- `AuditRun.error = null`;
+- `Document.status = "reviewed"`.
+
+`needs_review=true` alone never indicates a technical failure — only `used_fallback`
+(the orchestrator's own typed outcome) does. See [ARCHITECTURE.md](ARCHITECTURE.md)
+and [API_CONTRACTS.md](API_CONTRACTS.md) for the full outcome matrix.
 
 ---
 

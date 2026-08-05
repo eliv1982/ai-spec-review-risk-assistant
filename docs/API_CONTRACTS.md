@@ -243,10 +243,28 @@ Top-level denormalized response fields:
 
 ### Persistence and status outcomes
 
-- **Parsed `ModelReviewDraft` result or persisted safe `FinalReview` fallback:** commit review row, set document `status=reviewed`, and write audit atomically. Return `201` with the review payload. For fallbacks, review `needs_review=true`, review `error` non-null when applicable, and audit `status="error"` with a non-empty sanitized audit `error`. Successfully parsed results requiring human attention (including `model_needs_review=true` with empty deterministic codes) use audit `status="needs_review"` and audit `error=null`.
-- **No usable review can be stored:** roll back the failed review transaction; in a separate recovery transaction set `document.status="review_failed"` and write the error audit row with `entity_type="document"`, `entity_id=<document id>`, `status="error"`, and a non-empty sanitized `error`. Return HTTP `500` (or the concrete failure status if the document was not found — `404`).
+- **Parsed `ModelReviewDraft` result (no technical failure):** commit review row, set document `status=reviewed`, and write audit atomically. Return `201` with the review payload. Review `error=null`. A result requiring human attention (deterministic codes and/or `model_needs_review=true`) uses audit `status="needs_review"` and audit `error=null`; a result that needs no human attention uses audit `status="success"` and audit `error=null`. Either way `document.status="reviewed"` — `needs_review` reflects the *content* of a completed review, it is never a technical failure signal on its own.
+- **Persisted safe `FinalReview` fallback (technical failure, safely contained):** commit review row, set document `status="review_failed"`, and write audit atomically. Return `201` with the review payload — never a `5xx`/`502` for this case. Review `needs_review=true` and review `error` is a non-empty sanitized summary naming only the closed LLM error category; audit `status="error"` with the same non-empty sanitized `error`.
+- **No usable review can be stored (unexpected failure, no review row at all):** roll back the failed main review transaction (no partial `Review` row survives); attempt a separate, **best-effort** recovery transaction that sets `document.status="review_failed"` and writes the error audit row with `entity_type="document"`, `entity_id=<document id>`, `status="error"`, and a non-empty sanitized `error`. Return HTTP `500` (or the concrete failure status if the document was not found — `404`) either way, carrying the original workflow failure — never the recovery transaction's own failure, if it has one.
 
-`review_failed` reflects the latest document-backed review attempt that failed before a usable review row was persisted. A later successful or fallback-persisted attempt may change the document back to `reviewed`.
+  - **Recovery transaction succeeds:** `document.status="review_failed"` and exactly one error `AuditRun` (as above) are durably committed.
+  - **Recovery transaction itself also fails** (for example, a repeat database outage at recovery time): its commit is rolled back in full — no partial `document.status` change and no partial/duplicate `AuditRun` row are left behind. `documents.status` can remain at whatever it was *before* this review attempt (for example `created`, or `reviewed` from an earlier successful review of the same document), and no error audit row exists for this particular attempt. The HTTP response still reports the *original* main-workflow failure (`500`, or `404` for a missing document) — the recovery transaction's own failure is never surfaced to the caller and never replaces it. Persisting the recovery `document.status`/error-audit pair is **best-effort, not a guarantee**, once the database itself is unavailable or otherwise rejects the recovery write.
+
+`review_failed` covers both a persisted safe fallback and a review attempt that failed before any review row was persisted — either way, the automated pipeline did not complete a trustworthy review. A later attempt updates the document's status again: `reviewed` on a genuine success, `review_failed` again on another fallback or failure (subject to the best-effort caveat above when the *recovery* transaction itself fails).
+
+The best-effort caveat applies **only** to the "no usable review" recovery path above. It never weakens the guarantee for a persisted technical fallback whose own (main) transaction commits successfully: that case unconditionally has a persisted `Review` row, a non-null `Review.error`, an error `AuditRun`, `document.status="review_failed"`, and HTTP `201` — see the row above.
+
+Full outcome matrix for a document-backed review attempt (contract reconciliation, task "Contract reconciliation for persisted fallback"):
+
+| Outcome | `Review.error` | `AuditRun.status` | `AuditRun.error` | `Document.status` |
+| --- | --- | --- | --- | --- |
+| Success (`needs_review=false`) | `null` | `success` | `null` | `reviewed` |
+| Success requiring manual review (`needs_review=true`, no technical failure) | `null` | `needs_review` | `null` | `reviewed` |
+| Technical fallback (`used_fallback=true`, main transaction commits) | non-null sanitized summary | `error` | non-null sanitized summary | `review_failed` |
+| No usable review (recovery transaction succeeds) | no `Review` row | `error` | non-null sanitized summary | `review_failed` |
+| No usable review (recovery transaction also fails — best-effort, not guaranteed) | no `Review` row | no new `AuditRun` row for this attempt | n/a | unchanged from before this attempt |
+
+`needs_review=true` alone never indicates a technical failure — only `used_fallback` (the orchestrator's own typed outcome) does. A low-`confidence` or `not_ready` review that was successfully parsed and validated is still a `success`-technically-complete outcome and may use either `success` or `needs_review` audit status, never `error`.
 
 Preferred MVP behaviour for model/JSON/schema failure is always to persist the safe fallback and return `201` when persistence succeeds. Do not surface upstream failures as HTTP `502` when a safe fallback can be returned.
 
@@ -259,7 +277,7 @@ Every `document.review` audit snapshot records `prompt_version="spec-review-prom
 | Validated `ModelReviewDraft` → `FinalReview`, final `needs_review=false` | `success` | `null` | `review` / created review id |
 | Validated `ModelReviewDraft` → `FinalReview`, final `needs_review=true` (deterministic codes and/or `model_needs_review=true`) | `needs_review` | `null` | `review` / created review id |
 | Safe `FinalReview` fallback persisted | `error` | non-empty sanitized summary | `review` / created review id |
-| Failure before a review exists | `error` | non-empty sanitized summary | `document` / document id |
+| Failure before a review exists | `error` (best-effort: only if the recovery transaction itself succeeds) | non-empty sanitized summary (same caveat) | `document` / document id |
 
 **Errors:**
 
@@ -271,7 +289,7 @@ Every `document.review` audit snapshot records `prompt_version="spec-review-prom
 
 **Audit action name:** `document.review`
 
-**Creates domain record:** yes — `reviews` row when usable; updates `documents.status`; creates `audit_runs` row.
+**Creates domain record:** yes — `reviews` row when usable; updates `documents.status`; creates `audit_runs` row. For the "failure before a review exists" outcome, both the `documents.status` update and the `audit_runs` row are written by a **best-effort recovery transaction** and are only guaranteed when that recovery transaction itself commits successfully (see "Persistence and status outcomes" above).
 
 ---
 

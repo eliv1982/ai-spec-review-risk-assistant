@@ -23,11 +23,11 @@ API responses must use the same UTC representation. No alternative storage forma
 
 | Value | Meaning |
 | --- | --- |
-| `created` | Document stored; no successful persisted review yet |
-| `reviewed` | A review row was persisted (including safe fallback reviews) |
-| `review_failed` | The latest document-backed review attempt failed before a usable review row was persisted |
+| `created` | Document stored; no persisted review attempt yet |
+| `reviewed` | The latest document-backed review attempt completed technically successfully (a review row was persisted with `error=null`), regardless of whether its *content* sets `needs_review=true` |
+| `review_failed` | The latest document-backed review attempt did not complete a trustworthy automated review: either a safe fallback review row was persisted after a technical failure (`Review.error` non-null), or no usable review row could be persisted at all |
 
-A later successful or fallback-persisted review attempt may change `review_failed` back to `reviewed`.
+Each new document-backed review attempt re-sets `documents.status` from its own outcome: `reviewed` after a genuine success, `review_failed` after a fallback or a failed attempt — never left at `created` once a review has been attempted. For the "no usable review row could be persisted at all" case, this update is written by a separate, **best-effort recovery transaction** (see "Transaction boundaries (persistence)" below): if that recovery transaction itself fails (for example, a repeat database outage), `documents.status` is left at whatever value it already had before this attempt, not guaranteed to become `review_failed`.
 
 ### AuditStatus
 
@@ -203,9 +203,11 @@ One document may have multiple reviews over time. The MVP does not add a separat
 | --- | --- |
 | `document.create` | Document and audit row committed atomically |
 | Successful document-backed review | Review row, document status `reviewed`, and audit row committed atomically |
-| Persisted safe fallback | Fallback review, document status `reviewed`, and error audit row committed atomically |
-| No usable review can be stored | Roll back the failed review transaction; separate recovery transaction sets `document.status="review_failed"` and writes the error audit row |
+| Persisted safe fallback | Fallback review (`Review.error` non-null), document status `review_failed`, and error audit row (`audit_runs.error` non-null) committed atomically. This is the main persistence transaction succeeding — not the recovery path below — so it carries no best-effort caveat: a successfully committed fallback unconditionally has all three. |
+| No usable review can be stored | Roll back the failed main persistence transaction first — this atomically discards any partially-prepared `Document`/`Review`/`AuditRun` changes from that attempt, so no partial state from it survives. Then attempt a separate **recovery transaction** that tries to set `document.status="review_failed"` and write one error `AuditRun` row. This recovery write is **best-effort**, not guaranteed — if the recovery transaction's own commit also fails (for example, the database is itself unavailable), its changes are rolled back in full — no partial `Document.status` update and no partial/duplicate `AuditRun` row are left behind — and `documents.status` simply keeps whatever value it already had before this attempt (`created`, or `reviewed`/`review_failed` from an earlier attempt on the same document), with no new `AuditRun` row for this attempt. |
 | Required audit cannot be stored | Audited action must not be reported as successful |
+
+The best-effort caveat above applies only to the recovery transaction in the "no usable review can be stored" row. It does not weaken any other row in this table: `document.create`, a successful document-backed review, and a persisted safe fallback are each still committed atomically as their own single (non-recovery) transaction, with no best-effort qualifier.
 
 ## JSON serialization rules
 
