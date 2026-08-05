@@ -24,6 +24,9 @@ export type ReviewReadiness = (typeof REVIEW_READINESS_VALUES)[number];
 export const RISK_SEVERITY_VALUES = ["low", "medium", "high"] as const;
 export type RiskSeverity = (typeof RISK_SEVERITY_VALUES)[number];
 
+export const AUDIT_STATUS_VALUES = ["success", "needs_review", "error"] as const;
+export type AuditStatus = (typeof AUDIT_STATUS_VALUES)[number];
+
 export const RISK_CATEGORY_VALUES = [
   "scope",
   "functionality",
@@ -104,6 +107,33 @@ export interface ReviewResponse {
   needs_review: boolean;
   reason_codes: ReviewReasonCode[];
   error: string | null;
+}
+
+/** Generic envelope shared by every list endpoint (docs/API_CONTRACTS.md,
+ * "Pagination (all list endpoints)"). `total` counts rows matching active
+ * filters *before* `limit`/`offset`, never the current page length. */
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** `backend/app/schemas/audit.py::AuditRunResponse`. `entity_type`/`entity_id`
+ * are a generic (type, id) pair — the closest thing to a document/review
+ * link an audit row carries (docs/DATA_MODEL.md, "Entity mapping"); there is
+ * no dedicated `document_id`/`review_id` column on `audit_runs`. */
+export interface AuditRunResponse {
+  id: string;
+  created_at: string;
+  action: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  input_json: Record<string, unknown> | null;
+  output_json: Record<string, unknown> | null;
+  status: AuditStatus;
+  error: string | null;
+  duration_ms: number;
 }
 
 /**

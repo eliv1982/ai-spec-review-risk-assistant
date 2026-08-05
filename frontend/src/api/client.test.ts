@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, getApiBaseUrl, isAbortError, request } from "./client";
-import { parseDocumentResponse } from "./validators";
+import { parseDocumentResponse, parseReviewResponse } from "./validators";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -184,6 +184,46 @@ describe("request", () => {
     expect((error as ApiError).message).toBe(
       "Сервер вернул некорректный ответ. Повторите попытку или обратитесь к администратору.",
     );
+  });
+
+  it("ReviewResponse с расходящимся review_json (cross-field invariant) -> ApiError(kind='invalid_response')", async () => {
+    const finalReview = {
+      summary: "s",
+      risks: [],
+      missing_requirements: [],
+      contradictions: [],
+      questions_to_client: [],
+      acceptance_criteria: [],
+      confidence: "low",
+      document_readiness: "not_ready",
+      needs_review: false,
+      review_reason_codes: [],
+    };
+    // Top-level confidence="high" disagrees with review_json.confidence="low" —
+    // the whole response must be rejected, never silently reconciled.
+    const mismatchedReview = {
+      id: "review-1",
+      created_at: "2026-08-04T18:30:00Z",
+      document_id: "doc-1",
+      review_json: finalReview,
+      confidence: "high",
+      readiness: "not_ready",
+      needs_review: false,
+      reason_codes: [],
+      error: null,
+    };
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(jsonResponse(mismatchedReview, 200));
+
+    const error = await request("/reviews/review-1", undefined, parseReviewResponse).catch((e) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).kind).toBe("invalid_response");
+    expect((error as ApiError).message).toBe(
+      "Сервер вернул некорректный ответ. Повторите попытку или обратитесь к администратору.",
+    );
+    // The underlying technical mismatch detail is preserved for logging, but
+    // never surfaced as the user-facing message.
+    expect(String((error as ApiError).detail)).toMatch(/confidence/);
   });
 
   // -------------------------------------------------------------------------

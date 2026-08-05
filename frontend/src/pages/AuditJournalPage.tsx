@@ -1,0 +1,253 @@
+import { useEffect, useState } from "react";
+import { listAuditRuns } from "../api/audit";
+import { ApiError, isAbortError } from "../api/client";
+import type { AuditRunResponse, AuditStatus, PaginatedResponse } from "../types/api";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { LoadingIndicator } from "../components/LoadingIndicator";
+import { Pagination } from "../components/Pagination";
+import { JsonBlock } from "../components/JsonBlock";
+import { auditStatusBadgeClass, labelAuditStatus, labelEntityType } from "../utils/labels";
+import { computeCorrectedOffset } from "../utils/pagination";
+
+const PAGE_SIZE = 20;
+
+/** `error` reuses `errors_only=true` (docs/API_CONTRACTS.md) instead of
+ * `status=error` — functionally identical for this closed status enum, but
+ * exercises the dedicated `errors_only` query parameter. */
+type StatusFilter = "all" | "success" | "needs_review" | "error";
+
+type ListState =
+  | { status: "loading" }
+  | { status: "error"; error: ApiError }
+  | { status: "loaded"; data: PaginatedResponse<AuditRunResponse> };
+
+function extractVersionMeta(record: Record<string, unknown> | null): {
+  promptVersion?: string;
+  schemaVersion?: string;
+} {
+  if (!record) return {};
+  return {
+    promptVersion: typeof record.prompt_version === "string" ? record.prompt_version : undefined,
+    schemaVersion:
+      typeof record.review_schema_version === "string" ? record.review_schema_version : undefined,
+  };
+}
+
+export function AuditJournalPage() {
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [offset, setOffset] = useState(0);
+  const [reloadToken, setReloadToken] = useState(0);
+
+  const [state, setState] = useState<ListState>({ status: "loading" });
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+
+    const params = {
+      status: (statusFilter === "success" || statusFilter === "needs_review"
+        ? statusFilter
+        : undefined) as AuditStatus | undefined,
+      errorsOnly: statusFilter === "error",
+      limit: PAGE_SIZE,
+      offset,
+    };
+
+    setState({ status: "loading" });
+    listAuditRuns(params, controller.signal)
+      .then((data) => {
+        if (!active) return;
+
+        // See ReviewsDashboardPage: fall back to the nearest valid page
+        // instead of committing a dead-end empty state for an offset that
+        // no longer fits within the current (possibly filtered) `total`.
+        const corrected = computeCorrectedOffset({
+          itemCount: data.items.length,
+          offset: data.offset,
+          total: data.total,
+          pageSize: PAGE_SIZE,
+        });
+        if (corrected !== null) {
+          setOffset(corrected);
+          return;
+        }
+
+        setState({ status: "loaded", data });
+      })
+      .catch((err) => {
+        if (!active) return;
+        if (isAbortError(err)) return;
+        const apiError =
+          err instanceof ApiError
+            ? err
+            : new ApiError({ kind: "network", message: "Не удалось загрузить журнал аудита." });
+        setState({ status: "error", error: apiError });
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [statusFilter, offset, reloadToken]);
+
+  function handleStatusChange(value: StatusFilter) {
+    setStatusFilter(value);
+    setOffset(0);
+  }
+
+  function handleResetFilters() {
+    setStatusFilter("all");
+    setOffset(0);
+  }
+
+  function handlePrev() {
+    setOffset((current) => Math.max(0, current - PAGE_SIZE));
+  }
+
+  function handleNext() {
+    setOffset((current) => current + PAGE_SIZE);
+  }
+
+  function handleRetry() {
+    setReloadToken((token) => token + 1);
+  }
+
+  return (
+    <main className="page">
+      <div className="container-wide">
+        <h1>Журнал аудита</h1>
+        <p className="lead">
+          Технический журнал операций: успешные проверки, случаи, требующие ручной проверки, и
+          технические ошибки.
+        </p>
+
+        <div className="card filters-form">
+          <div className="filters-field">
+            <label htmlFor="audit-status-filter">Статус</label>
+            <select
+              id="audit-status-filter"
+              name="audit-status-filter"
+              value={statusFilter}
+              onChange={(event) => handleStatusChange(event.target.value as StatusFilter)}
+            >
+              <option value="all">Все записи</option>
+              <option value="success">Успешно</option>
+              <option value="needs_review">Требуется ручная проверка</option>
+              <option value="error">Только ошибки</option>
+            </select>
+          </div>
+
+          <div className="form-actions">
+            <button type="button" className="button button-secondary" onClick={handleResetFilters}>
+              Сбросить фильтры
+            </button>
+          </div>
+        </div>
+
+        {state.status === "loading" && <LoadingIndicator message="Загружаем журнал аудита…" />}
+
+        {state.status === "error" && (
+          <>
+            <ErrorBanner title="Не удалось загрузить журнал аудита" message={state.error.message} />
+            <div className="form-actions">
+              <button type="button" className="button button-secondary" onClick={handleRetry}>
+                Повторить попытку
+              </button>
+            </div>
+          </>
+        )}
+
+        {state.status === "loaded" && state.data.items.length === 0 && (
+          <p className="empty-state">По заданному фильтру записи аудита не найдены.</p>
+        )}
+
+        {state.status === "loaded" && state.data.items.length > 0 && (
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Дата и время</th>
+                  <th scope="col">Операция</th>
+                  <th scope="col">Статус</th>
+                  <th scope="col">Связанный объект</th>
+                  <th scope="col">Длительность</th>
+                  <th scope="col">Ошибка</th>
+                  <th scope="col">Детали</th>
+                </tr>
+              </thead>
+              <tbody>
+                {state.data.items.map((run) => {
+                  const inputMeta = extractVersionMeta(run.input_json);
+                  const outputMeta = extractVersionMeta(run.output_json);
+                  const promptVersion = inputMeta.promptVersion ?? outputMeta.promptVersion;
+                  const schemaVersion = inputMeta.schemaVersion ?? outputMeta.schemaVersion;
+
+                  return (
+                    <tr key={run.id}>
+                      <td>{run.created_at}</td>
+                      <td>
+                        <code>{run.action}</code>
+                        {(promptVersion || schemaVersion) && (
+                          <div className="row-note">
+                            {promptVersion && (
+                              <>
+                                prompt_version: <code>{promptVersion}</code>
+                              </>
+                            )}
+                            {promptVersion && schemaVersion && " · "}
+                            {schemaVersion && (
+                              <>
+                                review_schema_version: <code>{schemaVersion}</code>
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <span className={`badge ${auditStatusBadgeClass(run.status)}`}>
+                          {labelAuditStatus(run.status)}
+                        </span>
+                      </td>
+                      <td>
+                        {run.entity_type ? (
+                          <>
+                            {labelEntityType(run.entity_type)}
+                            <br />
+                            <code>{run.entity_id ?? "—"}</code>
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td>{run.duration_ms} мс</td>
+                      <td className="long-text">{run.error ?? "—"}</td>
+                      <td>
+                        <JsonBlock title="input_json" value={run.input_json} />
+                        <JsonBlock title="output_json" value={run.output_json} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Rendered whenever a page has loaded, independent of the current
+            page's item count — see ReviewsDashboardPage for why gating
+            Pagination on items.length would strand users on an
+            out-of-range empty page with no way back. */}
+        {state.status === "loaded" && (
+          <Pagination
+            limit={state.data.limit}
+            offset={state.data.offset}
+            itemCount={state.data.items.length}
+            total={state.data.total}
+            onPrev={handlePrev}
+            onNext={handleNext}
+          />
+        )}
+      </div>
+    </main>
+  );
+}

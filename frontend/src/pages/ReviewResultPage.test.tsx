@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
-import { ReviewResultPage } from "./ReviewResultPage";
+import { ReviewResultRoute } from "./ReviewResultPage";
 import { explainReasonCode } from "../utils/reasonCodes";
-import type { FinalReview, ReviewResponse } from "../types/api";
+import type { DocumentResponse, FinalReview, ReviewResponse } from "../types/api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -28,11 +28,24 @@ function flushMicrotasks() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** Routes a stubbed `fetch` by matching the end of the request URL against
+ * `routes` keys, in insertion order. Any unmatched URL rejects loudly rather
+ * than hanging, so a missing mock branch fails the test instead of timing out. */
+function routedFetch(routes: Array<[string, () => Response | Promise<Response>]>) {
+  return vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    for (const [suffix, handler] of routes) {
+      if (url.endsWith(suffix)) return Promise.resolve(handler());
+    }
+    return Promise.reject(new Error(`unexpected url: ${url}`));
+  });
+}
+
 function renderReviewPage(reviewId = "review-1") {
   return render(
     <MemoryRouter initialEntries={[`/reviews/${reviewId}`]}>
       <Routes>
-        <Route path="/reviews/:reviewId" element={<ReviewResultPage />} />
+        <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -60,6 +73,7 @@ const BASE_FINAL_REVIEW: Omit<FinalReview, "needs_review" | "review_reason_codes
 
 function buildReview(overrides: {
   id?: string;
+  documentId?: string;
   needs_review: boolean;
   reason_codes: string[];
 }): ReviewResponse {
@@ -67,7 +81,7 @@ function buildReview(overrides: {
   return {
     id,
     created_at: "2026-08-04T18:30:00Z",
-    document_id: "doc-1",
+    document_id: overrides.documentId ?? "doc-1",
     review_json: {
       ...BASE_FINAL_REVIEW,
       needs_review: overrides.needs_review,
@@ -81,6 +95,17 @@ function buildReview(overrides: {
   };
 }
 
+function buildDocument(overrides: Partial<DocumentResponse> = {}): DocumentResponse {
+  return {
+    id: "doc-1",
+    created_at: "2026-08-04T18:00:00Z",
+    title: "Название документа для теста",
+    text: "Полный исходный текст документа для теста.",
+    status: "reviewed",
+    ...overrides,
+  };
+}
+
 describe("ReviewResultPage", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn());
@@ -91,13 +116,18 @@ describe("ReviewResultPage", () => {
   });
 
   it("отображает блок «Требуется ручная проверка» и коды причин при needs_review=true", async () => {
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-      jsonResponse(
-        buildReview({
-          needs_review: true,
-          reason_codes: ["LOW_CONFIDENCE", "MISSING_ACCEPTANCE_CRITERIA"],
-        }),
-      ),
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        [
+          "/reviews/review-1",
+          () =>
+            jsonResponse(
+              buildReview({ needs_review: true, reason_codes: ["LOW_CONFIDENCE", "MISSING_ACCEPTANCE_CRITERIA"] }),
+            ),
+        ],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
     );
 
     renderReviewPage();
@@ -110,8 +140,12 @@ describe("ReviewResultPage", () => {
   });
 
   it("корректно отображает спокойный статус при needs_review=false", async () => {
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-      jsonResponse(buildReview({ needs_review: false, reason_codes: [] })),
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        ["/reviews/review-1", () => jsonResponse(buildReview({ needs_review: false, reason_codes: [] }))],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
     );
 
     renderReviewPage();
@@ -142,8 +176,12 @@ describe("ReviewResultPage", () => {
   });
 
   it("не ломается при пустых массивах и показывает нейтральные формулировки", async () => {
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-      jsonResponse(buildReview({ needs_review: false, reason_codes: [] })),
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        ["/reviews/review-1", () => jsonResponse(buildReview({ needs_review: false, reason_codes: [] }))],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
     );
 
     renderReviewPage();
@@ -161,8 +199,15 @@ describe("ReviewResultPage", () => {
   });
 
   it("безопасно отображает неизвестный reason code без падения интерфейса", async () => {
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-      jsonResponse(buildReview({ needs_review: true, reason_codes: ["FUTURE_UNKNOWN_CODE"] })),
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        [
+          "/reviews/review-1",
+          () => jsonResponse(buildReview({ needs_review: true, reason_codes: ["FUTURE_UNKNOWN_CODE"] })),
+        ],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
     );
 
     renderReviewPage();
@@ -172,8 +217,12 @@ describe("ReviewResultPage", () => {
   });
 
   it("при safe fallback (needs_review=true, пустые массивы) не утверждает «не обнаружено»", async () => {
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-      jsonResponse(buildReview({ needs_review: true, reason_codes: ["MODEL_ERROR"] })),
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        ["/reviews/review-1", () => jsonResponse(buildReview({ needs_review: true, reason_codes: ["MODEL_ERROR"] }))],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
     );
 
     renderReviewPage();
@@ -248,19 +297,23 @@ describe("ReviewResultPage", () => {
     const deferredReview1 = createDeferred<Response>();
     const deferredReview2 = createDeferred<Response>();
 
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/reviews/review-1")) return deferredReview1.promise;
-      if (url.endsWith("/reviews/review-2")) return deferredReview2.promise;
-      return Promise.reject(new Error(`unexpected url: ${url}`));
-    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1")) return deferredReview1.promise;
+        if (url.endsWith("/reviews/review-2")) return deferredReview2.promise;
+        if (url.endsWith("/documents/doc-1")) return Promise.resolve(jsonResponse(buildDocument()));
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
 
     const user = userEvent.setup();
     render(
       <MemoryRouter initialEntries={["/reviews/review-1"]}>
         <NavigateButton to="/reviews/review-2" />
         <Routes>
-          <Route path="/reviews/:reviewId" element={<ReviewResultPage />} />
+          <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -291,19 +344,23 @@ describe("ReviewResultPage", () => {
     const deferredReview1 = createDeferred<Response>();
     const deferredReview2 = createDeferred<Response>();
 
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/reviews/review-1")) return deferredReview1.promise;
-      if (url.endsWith("/reviews/review-2")) return deferredReview2.promise;
-      return Promise.reject(new Error(`unexpected url: ${url}`));
-    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1")) return deferredReview1.promise;
+        if (url.endsWith("/reviews/review-2")) return deferredReview2.promise;
+        if (url.endsWith("/documents/doc-1")) return Promise.resolve(jsonResponse(buildDocument()));
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
 
     const user = userEvent.setup();
     render(
       <MemoryRouter initialEntries={["/reviews/review-1"]}>
         <NavigateButton to="/reviews/review-2" />
         <Routes>
-          <Route path="/reviews/:reviewId" element={<ReviewResultPage />} />
+          <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -325,6 +382,185 @@ describe("ReviewResultPage", () => {
     expect(screen.getByText("Ручная проверка не требуется")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText(/не удалось загрузить проверку/i)).not.toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------
+  // Stale committed render (route-boundary + key={reviewId} regression):
+  // an AbortController/`active` guard only stops a *late async result* from
+  // overwriting current state — it does nothing about a component instance
+  // that is still mounted with A's state at the moment the URL already
+  // reads B, before A's effects have had a chance to reset anything. These
+  // tests assert on the render immediately after the route change, not
+  // after first awaiting B, since waiting for B lets passive effects catch
+  // up and would hide the defect the fix (route-bound `key`) addresses.
+  // ---------------------------------------------------------------------
+
+  it("A → B после полностью загруженного A: контент A исчезает сразу, до завершения B", async () => {
+    const deferredReview2 = createDeferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1")) {
+          return Promise.resolve(
+            jsonResponse(
+              buildReview({ id: "review-1", documentId: "doc-1", needs_review: false, reason_codes: [] }),
+            ),
+          );
+        }
+        if (url.endsWith("/documents/doc-1")) {
+          return Promise.resolve(jsonResponse(buildDocument({ id: "doc-1", title: "Документ A" })));
+        }
+        if (url.endsWith("/reviews/review-2")) return deferredReview2.promise;
+        if (url.endsWith("/documents/doc-2")) {
+          return Promise.resolve(jsonResponse(buildDocument({ id: "doc-2", title: "Документ B" })));
+        }
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/reviews/review-1"]}>
+        <NavigateButton to="/reviews/review-2" />
+        <Routes>
+          <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    // A is fully committed: review id and document title both rendered.
+    expect(await screen.findByText("review-1")).toBeInTheDocument();
+    expect(await screen.findByText("Документ A")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /перейти на \/reviews\/review-2/i }));
+
+    // Checked immediately — review-2's fetch (deferredReview2) has not
+    // resolved yet. No committed render at this point may still show A's
+    // id/title/summary; the loading state for B must already be visible.
+    expect(screen.queryByText("review-1")).not.toBeInTheDocument();
+    expect(screen.queryByText("Документ A")).not.toBeInTheDocument();
+    expect(screen.queryByText("Резюме проверки для теста.")).not.toBeInTheDocument();
+    expect(screen.getByText(/загружаем результат проверки/i)).toBeInTheDocument();
+
+    deferredReview2.resolve(
+      jsonResponse(buildReview({ id: "review-2", documentId: "doc-2", needs_review: false, reason_codes: [] })),
+    );
+    expect(await screen.findByText("review-2")).toBeInTheDocument();
+    expect(await screen.findByText("Документ B")).toBeInTheDocument();
+  });
+
+  it("pending document A: поздний success документа A не появляется после перехода на B", async () => {
+    const deferredDocA = createDeferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1")) {
+          return Promise.resolve(
+            jsonResponse(
+              buildReview({ id: "review-1", documentId: "doc-1", needs_review: false, reason_codes: [] }),
+            ),
+          );
+        }
+        if (url.endsWith("/documents/doc-1")) return deferredDocA.promise;
+        if (url.endsWith("/reviews/review-2")) {
+          return Promise.resolve(
+            jsonResponse(
+              buildReview({ id: "review-2", documentId: "doc-2", needs_review: false, reason_codes: [] }),
+            ),
+          );
+        }
+        if (url.endsWith("/documents/doc-2")) {
+          return Promise.resolve(jsonResponse(buildDocument({ id: "doc-2", title: "Документ B" })));
+        }
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/reviews/review-1"]}>
+        <NavigateButton to="/reviews/review-2" />
+        <Routes>
+          <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    // Review A loaded; document A's request is still pending.
+    expect(await screen.findByText("review-1")).toBeInTheDocument();
+    expect(screen.getByText(/загружаем исходный документ/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /перейти на \/reviews\/review-2/i }));
+
+    expect(await screen.findByText("review-2")).toBeInTheDocument();
+    expect(await screen.findByText("Документ B")).toBeInTheDocument();
+
+    // Document A's request — pending since before the navigation, on an
+    // instance that is now fully unmounted — resolves late. Its title must
+    // never appear, and B's already-displayed document must stay intact.
+    deferredDocA.resolve(jsonResponse(buildDocument({ id: "doc-1", title: "Документ A (устаревший)" })));
+    await flushMicrotasks();
+
+    expect(screen.queryByText("Документ A (устаревший)")).not.toBeInTheDocument();
+    expect(screen.getByText("Документ B")).toBeInTheDocument();
+  });
+
+  it("pending document A: поздняя ошибка документа A не появляется после перехода на B", async () => {
+    const deferredDocA = createDeferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1")) {
+          return Promise.resolve(
+            jsonResponse(
+              buildReview({ id: "review-1", documentId: "doc-1", needs_review: false, reason_codes: [] }),
+            ),
+          );
+        }
+        if (url.endsWith("/documents/doc-1")) return deferredDocA.promise;
+        if (url.endsWith("/reviews/review-2")) {
+          return Promise.resolve(
+            jsonResponse(
+              buildReview({ id: "review-2", documentId: "doc-2", needs_review: false, reason_codes: [] }),
+            ),
+          );
+        }
+        if (url.endsWith("/documents/doc-2")) {
+          return Promise.resolve(jsonResponse(buildDocument({ id: "doc-2", title: "Документ B" })));
+        }
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/reviews/review-1"]}>
+        <NavigateButton to="/reviews/review-2" />
+        <Routes>
+          <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("review-1")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /перейти на \/reviews\/review-2/i }));
+
+    expect(await screen.findByText("review-2")).toBeInTheDocument();
+    expect(await screen.findByText("Документ B")).toBeInTheDocument();
+
+    // Document A's pending request now fails late, on an unmounted instance.
+    deferredDocA.reject(new Error("boom: stale document A failure"));
+    await flushMicrotasks();
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("Документ B")).toBeInTheDocument();
   });
 
   it("cleanup при unmount реально отменяет запрос (signal.aborted) и игнорирует поздний ответ", async () => {
@@ -360,15 +596,23 @@ describe("ReviewResultPage", () => {
   it("под React.StrictMode не показывает ошибку и корректно завершает загрузку", async () => {
     // A fresh Response per call: StrictMode's dev-only double effect invocation
     // means fetch may run twice, and a Response body can only be read once.
-    (fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(() =>
-      Promise.resolve(jsonResponse(buildReview({ needs_review: false, reason_codes: [] }))),
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1")) {
+          return Promise.resolve(jsonResponse(buildReview({ needs_review: false, reason_codes: [] })));
+        }
+        if (url.endsWith("/documents/doc-1")) return Promise.resolve(jsonResponse(buildDocument()));
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
     );
 
     render(
       <StrictMode>
         <MemoryRouter initialEntries={["/reviews/review-1"]}>
           <Routes>
-            <Route path="/reviews/:reviewId" element={<ReviewResultPage />} />
+            <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
           </Routes>
         </MemoryRouter>
       </StrictMode>,
@@ -376,5 +620,131 @@ describe("ReviewResultPage", () => {
 
     expect(await screen.findByText("Ручная проверка не требуется")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------
+  // Source document card (docs task: "review detail page" requirements)
+  // ---------------------------------------------------------------------
+
+  it("загружает и отображает исходный документ: title и text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        ["/reviews/review-1", () => jsonResponse(buildReview({ needs_review: false, reason_codes: [] }))],
+        [
+          "/documents/doc-1",
+          () => jsonResponse(buildDocument({ title: "Спецификация модуля X", text: "Требование 1. Требование 2." })),
+        ],
+      ]),
+    );
+
+    renderReviewPage();
+
+    expect(await screen.findByText("Спецификация модуля X")).toBeInTheDocument();
+    expect(screen.getByText("Требование 1. Требование 2.")).toBeInTheDocument();
+  });
+
+  it("отображает свёрнутый блок с исходным review_json в формате JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        [
+          "/reviews/review-1",
+          () => jsonResponse(buildReview({ needs_review: true, reason_codes: ["LOW_CONFIDENCE"] })),
+        ],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
+    );
+
+    const { container } = renderReviewPage();
+
+    expect(await screen.findByText("review_json (JSON)")).toBeInTheDocument();
+    const details = container.querySelector(".json-block-details");
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute("open")).toBe(false);
+    const pre = container.querySelector("pre.json-block");
+    expect(pre?.textContent).toContain('"summary"');
+    expect(pre?.textContent).toContain("Резюме проверки для теста.");
+    expect(pre?.textContent).toContain('"review_reason_codes"');
+  });
+
+  it("ошибка загрузки документа не скрывает уже загруженный review", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        ["/reviews/review-1", () => jsonResponse(buildReview({ needs_review: false, reason_codes: [] }))],
+        ["/documents/doc-1", () => jsonResponse({ detail: "Внутренняя ошибка сервера" }, 500)],
+      ]),
+    );
+
+    renderReviewPage();
+
+    expect(await screen.findByText("Ручная проверка не требуется")).toBeInTheDocument();
+    expect(screen.getByText("Резюме проверки для теста.")).toBeInTheDocument();
+    expect(screen.getByText("Внутренняя ошибка сервера")).toBeInTheDocument();
+    expect(screen.getByText("Не удалось загрузить исходный документ")).toBeInTheDocument();
+  });
+
+  it("при смене reviewId на документ с другим document_id не показывает старый document", async () => {
+    const deferredDoc2 = createDeferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1")) {
+          return Promise.resolve(
+            jsonResponse(buildReview({ id: "review-1", documentId: "doc-1", needs_review: false, reason_codes: [] })),
+          );
+        }
+        if (url.endsWith("/reviews/review-2")) {
+          return Promise.resolve(
+            jsonResponse(buildReview({ id: "review-2", documentId: "doc-2", needs_review: false, reason_codes: [] })),
+          );
+        }
+        if (url.endsWith("/documents/doc-1")) {
+          return Promise.resolve(jsonResponse(buildDocument({ id: "doc-1", title: "Документ номер один" })));
+        }
+        if (url.endsWith("/documents/doc-2")) return deferredDoc2.promise;
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/reviews/review-1"]}>
+        <NavigateButton to="/reviews/review-2" />
+        <Routes>
+          <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Документ номер один")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /перейти на \/reviews\/review-2/i }));
+
+    // review-2 is loaded and its document fetch (doc-2) is still pending:
+    // the old document-1 title must already be gone, not lingering.
+    await screen.findByText("review-2");
+    expect(screen.queryByText("Документ номер один")).not.toBeInTheDocument();
+
+    deferredDoc2.resolve(jsonResponse(buildDocument({ id: "doc-2", title: "Документ номер два" })));
+    expect(await screen.findByText("Документ номер два")).toBeInTheDocument();
+  });
+
+  it("ссылка «К списку проверок» ведёт на /reviews", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        ["/reviews/review-1", () => jsonResponse(buildReview({ needs_review: false, reason_codes: [] }))],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
+    );
+
+    renderReviewPage();
+
+    const link = await screen.findByRole("link", { name: "К списку проверок" });
+    expect(link).toHaveAttribute("href", "/reviews");
   });
 });

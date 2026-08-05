@@ -1,22 +1,52 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { getReview } from "../api/reviews";
+import { getDocument } from "../api/documents";
 import { ApiError, isAbortError } from "../api/client";
-import type { ReviewResponse } from "../types/api";
+import type { DocumentResponse, ReviewResponse } from "../types/api";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { LoadingIndicator } from "../components/LoadingIndicator";
 import { ReasonCodeBadge } from "../components/ReasonCodeBadge";
-import { labelCategory, labelConfidence, labelReadiness, labelSeverity } from "../utils/labels";
+import { JsonBlock } from "../components/JsonBlock";
+import {
+  labelCategory,
+  labelConfidence,
+  labelDocumentStatus,
+  labelReadiness,
+  labelSeverity,
+} from "../utils/labels";
 
 type LoadState =
   | { status: "loading" }
   | { status: "error"; error: ApiError }
   | { status: "loaded"; review: ReviewResponse };
 
-export function ReviewResultPage() {
-  const { reviewId } = useParams<{ reviewId: string }>();
+type DocumentLoadState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; error: ApiError }
+  | { status: "loaded"; document: DocumentResponse };
+
+interface ReviewResultPageProps {
+  /** Required — always supplied by `ReviewResultRoute`, which already
+   * resolved and validated it from the URL. `ReviewResultPage` never reads
+   * `useParams` itself: it is mounted with `key={reviewId}` by its caller,
+   * so a route change from one review to another unmounts this instance and
+   * mounts a brand new one with fresh state, instead of reusing one instance
+   * across ids. That is what rules out a "committed render" where the URL
+   * already points at review B but the DOM still shows review/document A —
+   * an `active`/`AbortController` guard alone only stops a *late async
+   * result* from B being overwritten by A, not an already-rendered stale
+   * commit made from A's still-mounted state before its effects re-run. */
+  reviewId: string;
+}
+
+export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [reloadToken, setReloadToken] = useState(0);
+
+  const [documentState, setDocumentState] = useState<DocumentLoadState>({ status: "idle" });
+  const [documentReloadToken, setDocumentReloadToken] = useState(0);
 
   useEffect(() => {
     if (!reviewId) return;
@@ -52,21 +82,47 @@ export function ReviewResultPage() {
     };
   }, [reviewId, reloadToken]);
 
+  // Only known once the review has loaded — the document is fetched by the
+  // review's own `document_id`, never derived from the route param. Runs as
+  // a second, independent step (not in parallel with the review fetch) so a
+  // slow/failed document load can never delay or hide an already-successful
+  // review render.
+  const documentId = state.status === "loaded" ? state.review.document_id : null;
+
+  useEffect(() => {
+    if (!documentId) return;
+
+    let active = true;
+    const controller = new AbortController();
+
+    setDocumentState({ status: "loading" });
+    getDocument(documentId, controller.signal)
+      .then((document) => {
+        if (!active) return;
+        setDocumentState({ status: "loaded", document });
+      })
+      .catch((err) => {
+        if (!active) return;
+        if (isAbortError(err)) return;
+        const apiError =
+          err instanceof ApiError
+            ? err
+            : new ApiError({ kind: "network", message: "Не удалось загрузить исходный документ." });
+        setDocumentState({ status: "error", error: apiError });
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [documentId, documentReloadToken]);
+
   function handleRetry() {
     setReloadToken((token) => token + 1);
   }
 
-  if (!reviewId) {
-    return (
-      <main className="page">
-        <div className="container">
-          <ErrorBanner title="Некорректная ссылка" message="Не указан идентификатор проверки." />
-          <p>
-            <Link to="/">Вернуться к созданию документа</Link>
-          </p>
-        </div>
-      </main>
-    );
+  function handleDocumentRetry() {
+    setDocumentReloadToken((token) => token + 1);
   }
 
   if (state.status === "loading") {
@@ -90,7 +146,8 @@ export function ReviewResultPage() {
               устарела или содержит опечатку.
             </p>
             <p>
-              <Link to="/">Вернуться к созданию документа</Link>
+              <Link to="/">Вернуться к созданию документа</Link> ·{" "}
+              <Link to="/reviews">К списку проверок</Link>
             </p>
           </div>
         </main>
@@ -105,6 +162,9 @@ export function ReviewResultPage() {
             <button type="button" className="button button-secondary" onClick={handleRetry}>
               Повторить попытку
             </button>
+            <Link to="/reviews" className="button button-secondary">
+              К списку проверок
+            </Link>
             <Link to="/" className="button button-secondary">
               Вернуться к созданию документа
             </Link>
@@ -149,6 +209,50 @@ export function ReviewResultPage() {
               <dd>{labelConfidence(review.confidence)}</dd>
             </div>
           </dl>
+        </section>
+
+        <section className="card">
+          <h2>Исходный документ</h2>
+          {(documentState.status === "idle" || documentState.status === "loading") && (
+            <LoadingIndicator message="Загружаем исходный документ…" />
+          )}
+          {documentState.status === "error" && (
+            <>
+              <ErrorBanner
+                title="Не удалось загрузить исходный документ"
+                message={documentState.error.message}
+              />
+              <div className="form-actions">
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  onClick={handleDocumentRetry}
+                >
+                  Повторить попытку
+                </button>
+              </div>
+            </>
+          )}
+          {documentState.status === "loaded" && (
+            <>
+              <dl className="meta-grid">
+                <div>
+                  <dt>Название документа</dt>
+                  <dd>{documentState.document.title}</dd>
+                </div>
+                <div>
+                  <dt>Создан</dt>
+                  <dd>{documentState.document.created_at}</dd>
+                </div>
+                <div>
+                  <dt>Статус документа</dt>
+                  <dd>{labelDocumentStatus(documentState.document.status)}</dd>
+                </div>
+              </dl>
+              <h3>Текст документа</h3>
+              <p className="long-text">{documentState.document.text}</p>
+            </>
+          )}
         </section>
 
         {review.needs_review ? (
@@ -291,7 +395,19 @@ export function ReviewResultPage() {
           </section>
         )}
 
+        <section className="card">
+          <h2>Технические данные проверки</h2>
+          <p className="lead">
+            Полный сохранённый объект <code>review_json</code> в техническом JSON-формате — для
+            диагностики и сверки с тем, что показано выше.
+          </p>
+          <JsonBlock title="review_json (JSON)" value={review.review_json} />
+        </section>
+
         <div className="form-actions">
+          <Link to="/reviews" className="button button-secondary">
+            К списку проверок
+          </Link>
           <Link to="/" className="button button-primary">
             Создать новый документ
           </Link>
@@ -299,4 +415,32 @@ export function ReviewResultPage() {
       </div>
     </main>
   );
+}
+
+/**
+ * Route entry point for `/reviews/:reviewId`. Resolves and validates the URL
+ * param, then mounts `ReviewResultPage` with `key={reviewId}` — the `key`
+ * change forces React to unmount the previous review's component instance
+ * (synchronously, in the same commit) and mount a fresh one for the new id,
+ * rather than reusing one instance whose state effects haven't caught up
+ * yet. That is what guarantees no committed render can ever show review or
+ * document content for the old id once the URL has changed.
+ */
+export function ReviewResultRoute() {
+  const { reviewId } = useParams<{ reviewId: string }>();
+
+  if (!reviewId) {
+    return (
+      <main className="page">
+        <div className="container">
+          <ErrorBanner title="Некорректная ссылка" message="Не указан идентификатор проверки." />
+          <p>
+            <Link to="/">Вернуться к созданию документа</Link> · <Link to="/reviews">К списку проверок</Link>
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  return <ReviewResultPage key={reviewId} reviewId={reviewId} />;
 }

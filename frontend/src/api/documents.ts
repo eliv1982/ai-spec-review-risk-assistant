@@ -13,3 +13,12 @@ export function createDocument(
     parseDocumentResponse,
   );
 }
+
+/** GET /api/documents/{document_id} (docs/API_CONTRACTS.md). */
+export function getDocument(documentId: string, signal?: AbortSignal): Promise<DocumentResponse> {
+  return request<DocumentResponse>(
+    `/documents/${encodeURIComponent(documentId)}`,
+    { method: "GET", signal },
+    parseDocumentResponse,
+  );
+}
