@@ -1,6 +1,6 @@
-import { request } from "./client";
+import { request, requestCsvExport, type CsvExportResult } from "./client";
 import { parsePaginatedResponse, parseReviewResponse } from "./validators";
-import type { PaginatedResponse, ReviewResponse } from "../types/api";
+import type { PaginatedResponse, ReviewConfidence, ReviewReadiness, ReviewResponse } from "../types/api";
 
 /** POST /api/documents/{document_id}/review (docs/API_CONTRACTS.md). */
 export function runDocumentReview(documentId: string, signal?: AbortSignal): Promise<ReviewResponse> {
@@ -44,5 +44,39 @@ export function listReviews(
     `/reviews?${query.toString()}`,
     { method: "GET", signal },
     (data) => parsePaginatedResponse(data, parseReviewResponse, "ReviewsList"),
+  );
+}
+
+export interface ExportReviewsCsvParams {
+  /** Trimmed non-empty UUID string, or omitted for no filter. */
+  documentId?: string;
+  needsReview?: boolean;
+  confidence?: ReviewConfidence;
+  readiness?: ReviewReadiness;
+}
+
+/** GET /api/reviews/export (docs/API_CONTRACTS.md). Same filters as
+ * `listReviews`, but never paginated (no `limit`/`offset`) — exports every
+ * matching row as CSV. */
+export function exportReviewsCsv(
+  params: ExportReviewsCsvParams,
+  signal?: AbortSignal,
+): Promise<CsvExportResult> {
+  const query = new URLSearchParams();
+  if (params.documentId) query.set("document_id", params.documentId);
+  if (params.needsReview !== undefined) query.set("needs_review", String(params.needsReview));
+  if (params.confidence) query.set("confidence", params.confidence);
+  if (params.readiness) query.set("readiness", params.readiness);
+  const qs = query.toString();
+
+  return requestCsvExport(`/reviews/export${qs ? `?${qs}` : ""}`, "reviews-export.csv", signal);
+}
+
+/** GET /api/reviews/{review_id}/export (docs/API_CONTRACTS.md). */
+export function exportReviewCsv(reviewId: string, signal?: AbortSignal): Promise<CsvExportResult> {
+  return requestCsvExport(
+    `/reviews/${encodeURIComponent(reviewId)}/export`,
+    `review-${reviewId}.csv`,
+    signal,
   );
 }

@@ -37,11 +37,29 @@ total = number of records matching all active filters before limit and offset ar
 
 `total` is **not** the total unfiltered table size and **not** the number of items on the current page.
 
+The three CSV `/export` endpoints (see "CSV export conventions" below) are a deliberate exception: they accept the same *filters* as their list/detail counterpart but do not accept or use `limit`/`offset` — every matching row is exported in one response.
+
 ### Reason codes field naming
 
 - SQLite column name: `reason_codes_json` (JSON text array). See [DATA_MODEL.md](DATA_MODEL.md).
-- API response field name in all review payloads (create/list/detail/export and standalone AI): `reason_codes` — a native JSON array.
+- API response field name in all JSON review payloads (create/list/detail and standalone AI): `reason_codes` — a native JSON array.
 - The API serializes `reason_codes_json` as `reason_codes`. Clients never see the column name `reason_codes_json`.
+- The CSV export endpoints (below) are not JSON and use their own column named "Коды причин" — see "CSV export conventions".
+
+### CSV export conventions (all `/export` endpoints)
+
+Three read-only CSV export endpoints exist: `GET /api/reviews/export`, `GET /api/reviews/{review_id}/export`, `GET /api/audit-runs/export`. They share one format and one set of safety rules instead of each endpoint restating them:
+
+- **Encoding:** UTF-8 with a BOM (`UTF-8-SIG`) — required for the file to open with correct Cyrillic text in Excel.
+- **Delimiter:** `;` (semicolon) — opens correctly by default in a Russian-locale Excel.
+- **Line endings:** `\r\n` (standard CSV).
+- **Content-Type:** `text/csv; charset=utf-8`. The published OpenAPI schema documents `text/csv` (not `application/json`) as the `200` response's content type for all three endpoints — every documented `422` error response is still `application/json`, unchanged.
+- **Content-Disposition:** `attachment; filename="..."` with a static, ASCII, backend-chosen literal filename (`reviews-export.csv`, `audit-runs-export.csv`, `review-{review_id}.csv`) — never a document title or other user-supplied text.
+- **No pagination:** `limit`/`offset` are not accepted parameters. Every row matching the active filters is exported in one response; ordering matches the equivalent list endpoint (`created_at DESC`, then `id DESC`).
+- **Empty result:** `200` with the UTF-8 BOM and the header row only — no data rows, never a `404`.
+- **Formula/CSV injection protection (CWE-1236):** any string cell whose first significant character — the first character after skipping any leading ordinary spaces (`" "`) — is `= + - @` or a tab/carriage-return/line-feed is prefixed with a leading `'` before being written (prepended to the original value unchanged, leading spaces included), so Excel/LibreOffice/Sheets read it back as literal text instead of evaluating it as a formula. A cell already starting with `'` is left unchanged (idempotent — sanitization never doubles the apostrophe). A plain `/` is never a trigger character. This applies to every user- or model-derived text value that reaches a cell — document title, `error`, JSON detail cells, etc. — and only ever changes the CSV representation, never the underlying stored value.
+- **Not audited:** like the other read-only list/detail endpoints, exporting does not write an `audit_runs` row, on success or failure.
+- **Filters:** each export endpoint accepts exactly the same filters as its non-export counterpart (see each section below); no new filter combinations or invariants are introduced by exporting.
 
 ---
 
@@ -239,7 +257,7 @@ Top-level denormalized response fields:
 | `needs_review` | `review_json.needs_review` (final backend value) |
 | `reason_codes` | `review_json.review_reason_codes` (API serialization of column `reason_codes_json`) |
 
-`model_needs_review` is never exposed in persisted review responses, list responses, detail responses, standalone AI responses, or JSON exports.
+`model_needs_review` is never exposed in persisted review responses, list responses, detail responses, standalone AI responses, or CSV exports.
 
 ### Persistence and status outcomes
 
@@ -353,6 +371,47 @@ Ordering: `created_at DESC`, then `id DESC`.
 
 ---
 
+## GET /api/reviews/export
+
+**Purpose:** Export every persisted review matching the given filters as CSV. See "CSV export conventions" above for encoding/delimiter/formula-injection rules shared by all `/export` endpoints.
+
+Registered before `/{review_id}` in the router so this static path is never shadowed by the dynamic review-id route.
+
+**Query parameters:** identical to `GET /api/reviews` (`document_id`, `needs_review`, `confidence`, `readiness`) — `limit`/`offset` are not accepted.
+
+Ordering: `created_at DESC`, then `id DESC` — same as `GET /api/reviews`.
+
+**Success response:** `200`, `Content-Disposition: attachment; filename="reviews-export.csv"`.
+
+CSV columns (semicolon-delimited, Russian headers):
+
+| Column | Source |
+| --- | --- |
+| ID проверки | `review.id` |
+| ID документа | `review.document_id` |
+| Название документа | parent `document.title` (via a single JOIN — no N+1 query) |
+| Дата создания | `review.created_at` |
+| Требуется ручная проверка | `review.needs_review` as `true`/`false` |
+| Уверенность | `review.confidence` |
+| Готовность документа | `review.readiness` |
+| Коды причин | `review.reason_codes` joined with `\|`, in catalogue order |
+| Ошибка | `review.error`, or empty string when `null` |
+
+The full `review_json` is intentionally not included in this list export (would make the CSV unreadable) — use `GET /api/reviews/{review_id}/export` for a single review's complete data.
+
+**Errors:**
+
+| Code | When |
+| --- | --- |
+| 422 | Invalid query parameter types/values, including invalid UUID `document_id` |
+| 500 | Unexpected server failure |
+
+**Audit action name:** none (read-only; not audited).
+
+**Creates domain record:** no.
+
+---
+
 ## GET /api/reviews/{review_id}
 
 **Purpose:** Fetch a single persisted review.
@@ -381,7 +440,9 @@ Ordering: `created_at DESC`, then `id DESC`.
 
 ## GET /api/reviews/{review_id}/export
 
-**Purpose:** Export a review as downloadable JSON.
+**Purpose:** Export one review's full detail as a human-readable two-column CSV (`Поле` / `Значение`). See "CSV export conventions" above.
+
+> **Note (contract history):** an earlier draft of this document specified a JSON export at this same path, gated on an audited `review.export` action; it was never implemented (`backend/README.md` listed it under "not yet built"). This CSV contract supersedes that draft entirely — it is not audited, matching every other read-only detail endpoint.
 
 **Path parameters:**
 
@@ -389,49 +450,34 @@ Ordering: `created_at DESC`, then `id DESC`.
 | --- | --- | --- |
 | `review_id` | uuid string | yes |
 
-**Success response:** `200`
+**Success response:** `200`, `Content-Disposition: attachment; filename="review-{review_id}.csv"`.
 
-Content-Type: `application/json`
+Two columns, one row per field:
 
-The audit row is written **before** the export response is returned. Audit: `action=review.export`, `entity_type="review"`, `entity_id=<review id>`. Successful export → `status="success"` and `error=null`. Export failure → `status="error"` with a non-empty sanitized `error` summary; the action must not be reported as successful without the audit row.
-
-Exported `review.review_json` is a `FinalReview`. `model_needs_review` is never included.
-
-```json
-{
-  "exported_at": "2026-08-04T18:30:00Z",
-  "review": {
-    "id": "uuid",
-    "created_at": "2026-08-04T18:30:00Z",
-    "document_id": "uuid",
-    "review_json": { },
-    "confidence": "low",
-    "readiness": "needs_clarification",
-    "needs_review": true,
-    "reason_codes": ["LOW_CONFIDENCE"],
-    "error": null
-  },
-  "document": {
-    "id": "uuid",
-    "created_at": "2026-08-04T18:30:00Z",
-    "title": "string",
-    "text": "string",
-    "status": "reviewed"
-  }
-}
-```
+| Поле | Значение |
+| --- | --- |
+| ID проверки | `review.id` |
+| ID документа | `review.document_id` |
+| Название документа | parent `document.title`, or empty string if the document is unavailable |
+| Дата создания | `review.created_at` |
+| Требуется ручная проверка | `review.needs_review` as `true`/`false` |
+| Уверенность | `review.confidence` |
+| Готовность документа | `review.readiness` |
+| Коды причин | `review.reason_codes` joined with `\|`, in catalogue order |
+| Ошибка | `review.error`, or empty string when `null` |
+| Полный результат JSON | the complete `FinalReview` (`review.review_json`), serialized as one deterministic JSON string (`ensure_ascii=false`, sorted keys) in a single cell — no data loss, `model_needs_review` never included |
 
 **Errors:**
 
 | Code | When |
 | --- | --- |
-| 404 | Review not found (or linked document missing) |
+| 404 | Review not found |
 | 422 | Invalid `review_id` |
 | 500 | Unexpected server failure |
 
-**Audit action name:** `review.export`
+**Audit action name:** none (read-only; not audited).
 
-**Creates domain record:** no domain document/review row. Creates `audit_runs` row only.
+**Creates domain record:** no.
 
 ---
 
@@ -555,6 +601,45 @@ Ordering: `created_at DESC`, then `id DESC`.
 
 ---
 
+## GET /api/audit-runs/export
+
+**Purpose:** Export every audit run matching the given filters as CSV. See "CSV export conventions" above.
+
+Registered before `/{audit_run_id}` in the router so this static path is never shadowed by the dynamic audit-run-id route.
+
+**Query parameters:** identical to `GET /api/audit-runs` (`status`, `action`, `errors_only`) — `limit`/`offset` are not accepted. The list endpoint does not forbid passing `status` and `errors_only` together (they simply combine as an `AND` of both filters, as documented under "Audit status meanings" below); the export endpoint follows the exact same behavior rather than inventing a new restriction.
+
+Ordering: `created_at DESC`, then `id DESC` — same as `GET /api/audit-runs`.
+
+**Success response:** `200`, `Content-Disposition: attachment; filename="audit-runs-export.csv"`.
+
+CSV columns (semicolon-delimited, Russian headers):
+
+| Column | Source |
+| --- | --- |
+| ID записи | `audit_run.id` |
+| Действие | `audit_run.action` |
+| Тип сущности | `audit_run.entity_type`, or empty string when `null` |
+| ID сущности | `audit_run.entity_id`, or empty string when `null` |
+| Статус | `audit_run.status` |
+| Длительность, мс | `audit_run.duration_ms` |
+| Ошибка | `audit_run.error`, or empty string when `null` |
+| Дата создания | `audit_run.created_at` |
+| Детали JSON | `{"input_json": ..., "output_json": ...}` — both fields combined into one deterministic JSON string (`ensure_ascii=false`, sorted keys) in a single cell |
+
+**Errors:**
+
+| Code | When |
+| --- | --- |
+| 422 | Invalid query parameter types/values, including invalid `status` or an empty/whitespace-only `action` |
+| 500 | Unexpected server failure |
+
+**Audit action name:** none (read-only; not audited).
+
+**Creates domain record:** no.
+
+---
+
 ## GET /api/audit-runs/{audit_run_id}
 
 **Purpose:** Fetch a single audit run.
@@ -587,8 +672,9 @@ Ordering: `created_at DESC`, then `id DESC`.
 | --- | --- | --- | --- |
 | `document.create` | `POST /api/documents` | `documents` + `audit_runs` | `document` / created document id |
 | `document.review` | `POST /api/documents/{document_id}/review` | `reviews` (+ status update) when usable + `audit_runs` | `review` / review id when persisted; else `document` / document id |
-| `review.export` | `GET /api/reviews/{review_id}/export` | `audit_runs` only | `review` / review id |
 | `ai.review` | `POST /api/ai/review` | `audit_runs` only | both entity fields null |
+
+The three CSV `/export` endpoints (`GET /api/reviews/export`, `GET /api/reviews/{review_id}/export`, `GET /api/audit-runs/export`) are read-only and intentionally **not** in this catalogue — like every other list/detail `GET`, they never write an `audit_runs` row.
 
 ### Audit status meanings
 
@@ -596,7 +682,7 @@ Ordering: `created_at DESC`, then `id DESC`.
 | --- | --- |
 | `success` | The action completed without a technical error and manual review is not required |
 | `needs_review` | The model response was successfully parsed and validated, but the final deterministic result requires manual review |
-| `error` | Model, transport, JSON parsing, schema validation, persistence, or export failure occurred, including cases where a safe fallback was returned or persisted |
+| `error` | Model, transport, JSON parsing, schema validation, or persistence failure occurred, including cases where a safe fallback was returned or persisted |
 
 Status / `error` field invariants:
 
@@ -607,4 +693,4 @@ Status / `error` field invariants:
 
 `errors_only=true` means only `status == "error"`. It is not defined as `status=error OR error is non-null`, because the invariants above make that redundant and inconsistent rows must not be treated as valid data.
 
-Health and read/list endpoints are not audited.
+Health, read/list endpoints, and the CSV `/export` endpoints are not audited.

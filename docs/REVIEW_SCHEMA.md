@@ -56,7 +56,7 @@ Empty arrays remain allowed for list fields where the schema permits them.
 
 ## B. FinalReview
 
-Backend-produced object stored in `reviews.review_json` and returned inside API responses (including standalone `POST /api/ai/review` and JSON export).
+Backend-produced object stored in `reviews.review_json` and returned inside API responses (including standalone `POST /api/ai/review` and the single-review CSV export's `Полный результат JSON` cell).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |

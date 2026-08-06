@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
-import { listAuditRuns } from "../api/audit";
+import { useEffect, useRef, useState } from "react";
+import { exportAuditRunsCsv, listAuditRuns } from "../api/audit";
 import { ApiError, isAbortError } from "../api/client";
+import { downloadBlob } from "../utils/download";
 import type { AuditRunResponse, AuditStatus, PaginatedResponse } from "../types/api";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { LoadingIndicator } from "../components/LoadingIndicator";
@@ -21,6 +22,8 @@ type ListState =
   | { status: "error"; error: ApiError }
   | { status: "loaded"; data: PaginatedResponse<AuditRunResponse> };
 
+type ExportState = { status: "idle" } | { status: "pending" } | { status: "error"; error: ApiError };
+
 function extractVersionMeta(record: Record<string, unknown> | null): {
   promptVersion?: string;
   schemaVersion?: string;
@@ -39,6 +42,17 @@ export function AuditJournalPage() {
   const [reloadToken, setReloadToken] = useState(0);
 
   const [state, setState] = useState<ListState>({ status: "loading" });
+  const [exportState, setExportState] = useState<ExportState>({ status: "idle" });
+  // Guards the async export handler (a button click, not an effect) against
+  // triggering a download or updating state after this component has
+  // unmounted.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -112,6 +126,29 @@ export function AuditJournalPage() {
     setReloadToken((token) => token + 1);
   }
 
+  async function handleExportCsv() {
+    if (exportState.status === "pending") return;
+    setExportState({ status: "pending" });
+    try {
+      const { blob, filename } = await exportAuditRunsCsv({
+        status: (statusFilter === "success" || statusFilter === "needs_review"
+          ? statusFilter
+          : undefined) as AuditStatus | undefined,
+        errorsOnly: statusFilter === "error",
+      });
+      if (!isMountedRef.current) return;
+      downloadBlob(blob, filename);
+      setExportState({ status: "idle" });
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      const apiError =
+        err instanceof ApiError
+          ? err
+          : new ApiError({ kind: "network", message: "Не удалось сформировать CSV-файл." });
+      setExportState({ status: "error", error: apiError });
+    }
+  }
+
   return (
     <main className="page">
       <div className="container-wide">
@@ -143,6 +180,21 @@ export function AuditJournalPage() {
             </button>
           </div>
         </div>
+
+        <div className="form-actions">
+          <button
+            type="button"
+            className="button button-secondary"
+            onClick={handleExportCsv}
+            disabled={exportState.status === "pending"}
+          >
+            {exportState.status === "pending" ? "Формируется CSV…" : "Скачать CSV"}
+          </button>
+        </div>
+
+        {exportState.status === "error" && (
+          <ErrorBanner title="Не удалось сформировать CSV-файл" message={exportState.error.message} />
+        )}
 
         {state.status === "loading" && <LoadingIndicator message="Загружаем журнал аудита…" />}
 

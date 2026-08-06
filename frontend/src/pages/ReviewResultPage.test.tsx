@@ -748,3 +748,324 @@ describe("ReviewResultPage", () => {
     expect(link).toHaveAttribute("href", "/reviews");
   });
 });
+
+function csvResponse(body: string, headers: Record<string, string> = {}, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "text/csv; charset=utf-8", ...headers },
+  });
+}
+
+/** Routes `GET /reviews/{reviewId}` and `GET /documents/{documentId}` through
+ * fixed success responses, and `GET /reviews/{reviewId}/export` through
+ * `exportHandler` — verifying method + exact pathname suffix for the export
+ * route specifically (the other two reuse this file's existing `routedFetch`
+ * convention, which only matches on URL suffix). */
+function mockReviewPageWithExport(
+  reviewId: string,
+  review: ReviewResponse,
+  document: DocumentResponse,
+  exportHandler: (url: URL) => Response | Promise<Response>,
+) {
+  const exportSuffix = `/reviews/${reviewId}/export`;
+  const reviewSuffix = `/reviews/${reviewId}`;
+  const documentSuffix = `/documents/${document.id}`;
+
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+
+    if (url.endsWith(exportSuffix)) {
+      if (method !== "GET") {
+        return Promise.reject(new Error(`export mock: expected GET, got ${method}`));
+      }
+      return Promise.resolve(exportHandler(new URL(url)));
+    }
+    if (url.endsWith(reviewSuffix)) return Promise.resolve(jsonResponse(review));
+    if (url.endsWith(documentSuffix)) return Promise.resolve(jsonResponse(document));
+    return Promise.reject(new Error(`unexpected url: ${url}`));
+  });
+}
+
+describe("ReviewResultPage — экспорт CSV", () => {
+  let anchorClickSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+    (URL as unknown as { createObjectURL: unknown }).createObjectURL = vi.fn(() => "blob:mock-url");
+    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
+    anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+    delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+    anchorClickSpy.mockRestore();
+  });
+
+  it("кнопка «Скачать результат CSV» появляется только после успешной загрузки проверки", async () => {
+    const deferredReview = createDeferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1")) return deferredReview.promise;
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
+
+    renderReviewPage();
+    await screen.findByText(/загружаем результат проверки/i);
+    expect(screen.queryByRole("button", { name: "Скачать результат CSV" })).not.toBeInTheDocument();
+
+    deferredReview.resolve(
+      jsonResponse(buildReview({ needs_review: false, reason_codes: [] })),
+    );
+    // The document fetch fires next but the export button only depends on
+    // the review having loaded, not the document.
+    expect(await screen.findByRole("button", { name: "Скачать результат CSV" })).toBeInTheDocument();
+  });
+
+  it("экспорт использует точный review id из URL и запускает скачивание ровно один раз", async () => {
+    const review = buildReview({ id: "review-1", needs_review: false, reason_codes: [] });
+    const document = buildDocument();
+    const fetchMock = mockReviewPageWithExport("review-1", review, document, () => csvResponse("header\r\n"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    renderReviewPage("review-1");
+    await screen.findByRole("button", { name: "Скачать результат CSV" });
+
+    await user.click(screen.getByRole("button", { name: "Скачать результат CSV" }));
+    await screen.findByRole("button", { name: "Скачать результат CSV" });
+
+    const exportCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/reviews/review-1/export"));
+    expect(exportCall).toBeDefined();
+
+    // Positive assertion: the download was actually triggered exactly once —
+    // not merely "the export request was sent", which would also pass if
+    // downloadBlob were never called after a successful response.
+    expect(anchorClickSpy).toHaveBeenCalledTimes(1);
+
+    // No further download after the pending promise has already settled.
+    await flushMicrotasks();
+    expect(anchorClickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("кнопка отключена во время формирования CSV, текст меняется", async () => {
+    const review = buildReview({ id: "review-1", needs_review: false, reason_codes: [] });
+    const document = buildDocument();
+    const deferredExport = createDeferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      mockReviewPageWithExport("review-1", review, document, () => deferredExport.promise),
+    );
+
+    const user = userEvent.setup();
+    renderReviewPage("review-1");
+    const button = await screen.findByRole("button", { name: "Скачать результат CSV" });
+
+    await user.click(button);
+    expect(await screen.findByRole("button", { name: "Формируется CSV…" })).toBeDisabled();
+
+    deferredExport.resolve(csvResponse("header\r\n"));
+    await screen.findByRole("button", { name: "Скачать результат CSV" });
+    expect(screen.getByRole("button", { name: "Скачать результат CSV" })).not.toBeDisabled();
+  });
+
+  it("ошибка экспорта отображается отдельно от ошибки загрузки страницы", async () => {
+    const review = buildReview({ id: "review-1", needs_review: false, reason_codes: [] });
+    const document = buildDocument();
+    vi.stubGlobal(
+      "fetch",
+      mockReviewPageWithExport("review-1", review, document, () =>
+        jsonResponse({ detail: "Внутренняя ошибка сервера" }, 500),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderReviewPage("review-1");
+    await screen.findByRole("button", { name: "Скачать результат CSV" });
+    // The review itself loaded successfully — no page-load error banner.
+    expect(screen.queryByText("Не удалось загрузить проверку")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Скачать результат CSV" }));
+
+    expect(await screen.findByText("Не удалось сформировать CSV-файл")).toBeInTheDocument();
+    expect(screen.getByText("Внутренняя ошибка сервера")).toBeInTheDocument();
+    // Still no page-load error — the two error surfaces are independent.
+    expect(screen.queryByText("Не удалось загрузить проверку")).not.toBeInTheDocument();
+  });
+
+  it("двойной клик не запускает два экспорт-запроса", async () => {
+    const review = buildReview({ id: "review-1", needs_review: false, reason_codes: [] });
+    const document = buildDocument();
+    const deferredExport = createDeferred<Response>();
+    let exportCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      mockReviewPageWithExport("review-1", review, document, () => {
+        exportCalls += 1;
+        return deferredExport.promise;
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderReviewPage("review-1");
+    const button = await screen.findByRole("button", { name: "Скачать результат CSV" });
+
+    await user.click(button);
+    await user.click(button); // second click while pending must be a no-op
+
+    expect(exportCalls).toBe(1);
+
+    deferredExport.resolve(csvResponse("header\r\n"));
+    await screen.findByRole("button", { name: "Скачать результат CSV" });
+  });
+
+  it("повторный клик после ошибки экспорта работает (retry)", async () => {
+    const review = buildReview({ id: "review-1", needs_review: false, reason_codes: [] });
+    const document = buildDocument();
+    let exportCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      mockReviewPageWithExport("review-1", review, document, () => {
+        exportCalls += 1;
+        if (exportCalls === 1) return jsonResponse({ detail: "Внутренняя ошибка сервера" }, 500);
+        return csvResponse("header\r\n");
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderReviewPage("review-1");
+    await screen.findByRole("button", { name: "Скачать результат CSV" });
+
+    await user.click(screen.getByRole("button", { name: "Скачать результат CSV" }));
+    await screen.findByText("Не удалось сформировать CSV-файл");
+
+    await user.click(screen.getByRole("button", { name: "Скачать результат CSV" }));
+    await screen.findByRole("button", { name: "Скачать результат CSV" });
+
+    expect(screen.queryByText("Не удалось сформировать CSV-файл")).not.toBeInTheDocument();
+    expect(exportCalls).toBe(2);
+  });
+
+  it("переход на другую проверку во время экспорта не обновляет состояние размонтированного компонента", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const review1 = buildReview({ id: "review-1", documentId: "doc-1", needs_review: false, reason_codes: [] });
+    const review2 = buildReview({ id: "review-2", documentId: "doc-2", needs_review: false, reason_codes: [] });
+    const doc1 = buildDocument({ id: "doc-1", title: "Документ один" });
+    const doc2 = buildDocument({ id: "doc-2", title: "Документ два" });
+    const deferredExport = createDeferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1/export")) return deferredExport.promise;
+        if (url.endsWith("/reviews/review-1")) return Promise.resolve(jsonResponse(review1));
+        if (url.endsWith("/reviews/review-2")) return Promise.resolve(jsonResponse(review2));
+        if (url.endsWith("/documents/doc-1")) return Promise.resolve(jsonResponse(doc1));
+        if (url.endsWith("/documents/doc-2")) return Promise.resolve(jsonResponse(doc2));
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/reviews/review-1"]}>
+        <NavigateButton to="/reviews/review-2" />
+        <Routes>
+          <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Скачать результат CSV" }));
+    await screen.findByRole("button", { name: "Формируется CSV…" });
+
+    // Navigate away while the export request for review-1 is still pending —
+    // unmounts the review-1 instance of ReviewResultPage entirely.
+    await user.click(screen.getByRole("button", { name: /перейти на \/reviews\/review-2/i }));
+    await screen.findByText("Документ два");
+
+    // The stale export resolves after the component is gone: must not throw
+    // or log a React "state update on unmounted component" warning, and must
+    // not affect the now-mounted review-2 page.
+    deferredExport.resolve(csvResponse("header\r\n"));
+    await flushMicrotasks();
+
+    expect(screen.getByText("Документ два")).toBeInTheDocument();
+    expect(screen.queryByText("Не удалось сформировать CSV-файл")).not.toBeInTheDocument();
+    // Explicit positive assertion that the gap Codex flagged is closed: a
+    // late-resolving export for the unmounted review-1 instance must not
+    // trigger a download. This is what fails if the mounted-ref guard before
+    // downloadBlob() is removed.
+    expect(anchorClickSpy).not.toHaveBeenCalled();
+    const reactWarnings = consoleErrorSpy.mock.calls.filter(([msg]) =>
+      typeof msg === "string" && msg.includes("state update"),
+    );
+    expect(reactWarnings).toHaveLength(0);
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("переход на другую проверку во время экспорта: последующий reject не запускает скачивание и не обновляет состояние размонтированного компонента", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const review1 = buildReview({ id: "review-1", documentId: "doc-1", needs_review: false, reason_codes: [] });
+    const review2 = buildReview({ id: "review-2", documentId: "doc-2", needs_review: false, reason_codes: [] });
+    const doc1 = buildDocument({ id: "doc-1", title: "Документ один" });
+    const doc2 = buildDocument({ id: "doc-2", title: "Документ два" });
+    const deferredExport = createDeferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/reviews/review-1/export")) return deferredExport.promise;
+        if (url.endsWith("/reviews/review-1")) return Promise.resolve(jsonResponse(review1));
+        if (url.endsWith("/reviews/review-2")) return Promise.resolve(jsonResponse(review2));
+        if (url.endsWith("/documents/doc-1")) return Promise.resolve(jsonResponse(doc1));
+        if (url.endsWith("/documents/doc-2")) return Promise.resolve(jsonResponse(doc2));
+        return Promise.reject(new Error(`unexpected url: ${url}`));
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/reviews/review-1"]}>
+        <NavigateButton to="/reviews/review-2" />
+        <Routes>
+          <Route path="/reviews/:reviewId" element={<ReviewResultRoute />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Скачать результат CSV" }));
+    await screen.findByRole("button", { name: "Формируется CSV…" });
+
+    // Navigate away while the export request for review-1 is still pending —
+    // unmounts the review-1 instance of ReviewResultPage entirely.
+    await user.click(screen.getByRole("button", { name: /перейти на \/reviews\/review-2/i }));
+    await screen.findByText("Документ два");
+
+    // The stale export rejects after the component is gone: must not throw
+    // out of the test (awaited via flushMicrotasks, never an unhandled
+    // rejection), must not trigger a download, must not show an export error
+    // for the unmounted instance, and must not affect the now-mounted
+    // review-2 page.
+    deferredExport.reject(new Error("boom: late rejection after unmount"));
+    await flushMicrotasks();
+
+    expect(screen.getByText("Документ два")).toBeInTheDocument();
+    expect(screen.queryByText("Не удалось сформировать CSV-файл")).not.toBeInTheDocument();
+    expect(anchorClickSpy).not.toHaveBeenCalled();
+    const reactWarnings = consoleErrorSpy.mock.calls.filter(([msg]) =>
+      typeof msg === "string" && msg.includes("state update"),
+    );
+    expect(reactWarnings).toHaveLength(0);
+
+    consoleErrorSpy.mockRestore();
+  });
+});

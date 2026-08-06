@@ -207,9 +207,25 @@ orchestration/QC/fallback/persistence в роутере:
 подробности — в корневом `../docs/ARCHITECTURE.md` ("Frontend sections"). Настоящий
 backend README документирует только сам бэкенд.
 
+Реализован также безопасный CSV-экспорт: список проверок (`GET /api/reviews/export`),
+список записей аудита (`GET /api/audit-runs/export`) и одна подробная проверка
+(`GET /api/reviews/{review_id}/export`). Общая логика — `app/services/csv_export.py`
+(`sanitize_csv_cell`, `serialize_json_cell`, `build_csv_bytes`, `build_csv_response`;
+стандартная библиотека `csv`/`io`/`json`, без сторонних зависимостей): `UTF-8` с BOM,
+разделитель `;`, окончания строк `\r\n`, статичные ASCII-имена файлов в
+`Content-Disposition`, и защита от CSV/spreadsheet formula injection — ведущий апостроф
+для любой строковой ячейки, чей первый значимый символ (после обычных пробелов `" "`,
+не любых whitespace-символов) — один из `= + - @` или табуляции/`\r`/`\n`; апостроф
+добавляется перед исходным значением целиком (ведущие пробелы и управляющий символ не
+удаляются), а уже защищённая ячейка (начинающаяся с `'`) повторно не изменяется.
+Экспорт использует те же фильтры, что и соответствующий list/detail-эндпоint, но не
+принимает `limit`/`offset` — экспортируются все подходящие записи; сортировка совпадает
+со списком (`created_at DESC`, затем `id DESC`). Экспорт read-only и не создаёт запись
+аудита — как и остальные list/detail-эндпоинты. Подробности — в
+`../docs/API_CONTRACTS.md`.
+
 **Ещё не реализовано на этом этапе** (сознательно вне рамок текущего этапа):
 
-- экспорт проверки в JSON (`GET /api/reviews/{review_id}/export`);
 - Docker.
 
 ## Структура проекта
@@ -240,7 +256,10 @@ backend/
                       review_workflow (ReviewWorkflow: атомарное сохранение Review +
                       AuditRun для существующего документа, PersistedReviewResult),
                       ai_review_service (AIReviewService: тот же orchestrator без
-                      persistence Document/Review, только audit_runs для ai.review)
+                      persistence Document/Review, только audit_runs для ai.review),
+                      csv_export (sanitize_csv_cell, serialize_json_cell,
+                      build_csv_bytes, build_csv_response — общая CSV-логика для
+                      /export эндпоинтов reviews/audit_runs)
     llm/              клиент OpenAI Structured Outputs: client.py (OpenAIReviewClient,
                       метод review(document_text) -> ModelReviewDraft), errors.py
                       (типизированные ошибки LLMConfigurationError/LLMProviderError/
@@ -310,12 +329,17 @@ API обслуживается под префиксом `/api`, наприме�
   `404`; безопасный LLM-fallback возвращается обычным `201` с `needs_review=true`.
 - `GET /api/reviews` — список сохранённых проверок с фильтрами `document_id`,
   `needs_review`, `confidence`, `readiness`, пагинацией и сортировкой.
+- `GET /api/reviews/export` — CSV-экспорт всех проверок по тем же фильтрам, без
+  пагинации (см. "CSV-экспорт" выше).
 - `GET /api/reviews/{review_id}` — получение проверки по идентификатору.
+- `GET /api/reviews/{review_id}/export` — CSV-экспорт одной подробной проверки.
 - `POST /api/ai/review` — stateless демонстрационная проверка переданного текста
   (`200`), без создания `Document`/`Review`; создаётся только строка `audit_runs`
   (`action="ai.review"`).
 - `GET /api/audit-runs` — список записей аудита с фильтрами `status`, `action`,
   `errors_only`, пагинацией и сортировкой.
+- `GET /api/audit-runs/export` — CSV-экспорт всех записей аудита по тем же фильтрам,
+  без пагинации.
 - `GET /api/audit-runs/{audit_run_id}` — получение записи аудита по идентификатору.
 
 Полное описание контрактов см. в `../docs/API_CONTRACTS.md`.

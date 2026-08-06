@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getReview } from "../api/reviews";
+import { exportReviewCsv, getReview } from "../api/reviews";
 import { getDocument } from "../api/documents";
 import { ApiError, isAbortError } from "../api/client";
+import { downloadBlob } from "../utils/download";
 import type { DocumentResponse, ReviewResponse } from "../types/api";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { LoadingIndicator } from "../components/LoadingIndicator";
@@ -27,6 +28,8 @@ type DocumentLoadState =
   | { status: "error"; error: ApiError }
   | { status: "loaded"; document: DocumentResponse };
 
+type ExportState = { status: "idle" } | { status: "pending" } | { status: "error"; error: ApiError };
+
 interface ReviewResultPageProps {
   /** Required — always supplied by `ReviewResultRoute`, which already
    * resolved and validated it from the URL. `ReviewResultPage` never reads
@@ -47,6 +50,20 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
 
   const [documentState, setDocumentState] = useState<DocumentLoadState>({ status: "idle" });
   const [documentReloadToken, setDocumentReloadToken] = useState(0);
+
+  const [exportState, setExportState] = useState<ExportState>({ status: "idle" });
+  // Guards the async export handler (a button click, not an effect) against
+  // updating state after this component instance has unmounted — which
+  // happens on every review-to-review route change, since `ReviewResultRoute`
+  // mounts a fresh instance per `reviewId` (see the `key={reviewId}` note
+  // below).
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!reviewId) return;
@@ -123,6 +140,24 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
 
   function handleDocumentRetry() {
     setDocumentReloadToken((token) => token + 1);
+  }
+
+  async function handleExportCsv() {
+    if (exportState.status === "pending") return;
+    setExportState({ status: "pending" });
+    try {
+      const { blob, filename } = await exportReviewCsv(reviewId);
+      if (!isMountedRef.current) return;
+      downloadBlob(blob, filename);
+      setExportState({ status: "idle" });
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      const apiError =
+        err instanceof ApiError
+          ? err
+          : new ApiError({ kind: "network", message: "Не удалось сформировать CSV-файл." });
+      setExportState({ status: "error", error: apiError });
+    }
   }
 
   if (state.status === "loading") {
@@ -210,6 +245,21 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
             </div>
           </dl>
         </section>
+
+        <div className="form-actions">
+          <button
+            type="button"
+            className="button button-secondary"
+            onClick={handleExportCsv}
+            disabled={exportState.status === "pending"}
+          >
+            {exportState.status === "pending" ? "Формируется CSV…" : "Скачать результат CSV"}
+          </button>
+        </div>
+
+        {exportState.status === "error" && (
+          <ErrorBanner title="Не удалось сформировать CSV-файл" message={exportState.error.message} />
+        )}
 
         <section className="card">
           <h2>Исходный документ</h2>

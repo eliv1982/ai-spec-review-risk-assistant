@@ -78,7 +78,7 @@ is swallowed so it never masks the original error. `BaseException` subclasses th
 are not `Exception` (in particular `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`)
 are never caught here at all.
 
-Out of scope here: HTTP endpoints, HTTP status mapping, JSON export, retries, a
+Out of scope here: HTTP endpoints, HTTP status mapping, CSV export, retries, a
 second LLM call, background tasks/queues, and review-version comparison — see
 backend/README.md.
 """

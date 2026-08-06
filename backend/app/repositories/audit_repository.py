@@ -39,6 +39,22 @@ class AuditRunRepository:
     def get_by_id(self, audit_run_id: str) -> Optional[AuditRun]:
         return self.db.get(AuditRun, audit_run_id)
 
+    def _filters(
+        self,
+        *,
+        status: Optional[str],
+        action: Optional[str],
+        errors_only: bool,
+    ) -> list[Any]:
+        filters: list[Any] = []
+        if status is not None:
+            filters.append(AuditRun.status == status)
+        if errors_only:
+            filters.append(AuditRun.status == AuditStatus.error.value)
+        if action is not None:
+            filters.append(AuditRun.action == action)
+        return filters
+
     def list(
         self,
         *,
@@ -48,13 +64,7 @@ class AuditRunRepository:
         limit: int,
         offset: int,
     ) -> tuple[Sequence[AuditRun], int]:
-        filters = []
-        if status is not None:
-            filters.append(AuditRun.status == status)
-        if errors_only:
-            filters.append(AuditRun.status == AuditStatus.error.value)
-        if action is not None:
-            filters.append(AuditRun.action == action)
+        filters = self._filters(status=status, action=action, errors_only=errors_only)
 
         total = self.db.scalar(select(func.count()).select_from(AuditRun).where(*filters)) or 0
 
@@ -67,3 +77,21 @@ class AuditRunRepository:
         )
         items = self.db.scalars(stmt).all()
         return items, total
+
+    def list_all_for_export(
+        self,
+        *,
+        status: Optional[str] = None,
+        action: Optional[str] = None,
+        errors_only: bool = False,
+    ) -> Sequence[AuditRun]:
+        """Same filters and ordering as `list`, without `limit`/`offset` — used
+        only by CSV export, never by the paginated list endpoint."""
+        filters = self._filters(status=status, action=action, errors_only=errors_only)
+
+        stmt = (
+            select(AuditRun)
+            .where(*filters)
+            .order_by(AuditRun.created_at.desc(), AuditRun.id.desc())
+        )
+        return self.db.scalars(stmt).all()

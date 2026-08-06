@@ -11,6 +11,7 @@ import type { AuditRunResponse, AuditStatus } from "../types/api";
 const AUDIT_LIST_URL = new URL(`${getApiBaseUrl()}/audit-runs`);
 const AUDIT_LIST_ORIGIN = AUDIT_LIST_URL.origin;
 const AUDIT_LIST_PATHNAME = AUDIT_LIST_URL.pathname;
+const AUDIT_EXPORT_PATHNAME = `${AUDIT_LIST_PATHNAME}/export`;
 
 /** Throws unless the request is `GET <origin>/api/audit-runs` — so a
  * production regression (`/api/audit`, `/api/reviews`, a missing `/api`
@@ -107,6 +108,46 @@ function mockAuditApi(allItems: AuditRunResponse[]) {
     const offset = Number(url.searchParams.get("offset") ?? "0");
     const status = url.searchParams.get("status");
     const errorsOnly = url.searchParams.get("errors_only") === "true";
+
+    let filtered = allItems;
+    if (status) filtered = filtered.filter((item) => item.status === status);
+    if (errorsOnly) filtered = filtered.filter((item) => item.status === "error");
+
+    const page = filtered.slice(offset, offset + limit);
+    return Promise.resolve(jsonResponse(paginated(page, { total: filtered.length, limit, offset })));
+  });
+}
+
+function csvResponse(body: string, headers: Record<string, string> = {}, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "text/csv; charset=utf-8", ...headers },
+  });
+}
+
+/** Routes `GET /api/audit-runs` through the same list logic as `mockAuditApi`,
+ * and `GET /api/audit-runs/export` through `exportHandler` — a single fetch
+ * mock serving both the already-loaded table and an export click without
+ * either request satisfying the other's expectations. */
+function mockAuditApiWithExport(
+  allItems: AuditRunResponse[],
+  exportHandler: (url: URL) => Response | Promise<Response>,
+) {
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input.toString());
+    if (url.pathname === AUDIT_EXPORT_PATHNAME) {
+      const method = init?.method ?? "GET";
+      if (method !== "GET") {
+        throw new Error(`audit export mock: expected GET, got ${method}`);
+      }
+      return Promise.resolve(exportHandler(url));
+    }
+
+    const listUrl = assertAuditListRequest(input, init);
+    const limit = Number(listUrl.searchParams.get("limit") ?? "20");
+    const offset = Number(listUrl.searchParams.get("offset") ?? "0");
+    const status = listUrl.searchParams.get("status");
+    const errorsOnly = listUrl.searchParams.get("errors_only") === "true";
 
     let filtered = allItems;
     if (status) filtered = filtered.filter((item) => item.status === status);
@@ -573,5 +614,252 @@ describe("AuditJournalPage", () => {
     expect(await screen.findByText("По заданному фильтру записи аудита не найдены.")).toBeInTheDocument();
     expect(await screen.findByText("Нет записей")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("AuditJournalPage — экспорт CSV", () => {
+  let anchorClickSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+    (URL as unknown as { createObjectURL: unknown }).createObjectURL = vi.fn(() => "blob:mock-url");
+    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
+    anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+    delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+    anchorClickSpy.mockRestore();
+  });
+
+  it("кнопка «Скачать CSV» видна после загрузки журнала", async () => {
+    vi.stubGlobal("fetch", mockAuditApiWithExport([], () => csvResponse("header\r\n")));
+
+    renderPage();
+    await screen.findByText("По заданному фильтру записи аудита не найдены.");
+
+    expect(screen.getByRole("button", { name: "Скачать CSV" })).toBeInTheDocument();
+  });
+
+  it("экспорт использует текущий фильтр статуса и никогда не отправляет status вместе с errors_only", async () => {
+    const fetchMock = mockAuditApiWithExport(
+      [buildAuditRun({ id: "audit-err", status: "error" })],
+      () => csvResponse("header\r\n"),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByRole("table");
+
+    await user.selectOptions(screen.getByLabelText("Статус"), "error");
+    await screen.findByRole("table");
+
+    await user.click(screen.getByRole("button", { name: "Скачать CSV" }));
+    await screen.findByRole("button", { name: "Скачать CSV" });
+
+    const exportCall = fetchMock.mock.calls.find(
+      ([url]) => new URL(String(url)).pathname === AUDIT_EXPORT_PATHNAME,
+    );
+    expect(exportCall).toBeDefined();
+    const exportUrl = new URL(String(exportCall![0]));
+    expect(exportUrl.searchParams.get("errors_only")).toBe("true");
+    expect(exportUrl.searchParams.has("status")).toBe(false);
+    expect(exportUrl.searchParams.has("limit")).toBe(false);
+    expect(exportUrl.searchParams.has("offset")).toBe(false);
+  });
+
+  it("экспорт со статусом success формирует query status=success без errors_only", async () => {
+    const fetchMock = mockAuditApiWithExport(
+      [buildAuditRun({ id: "audit-ok", status: "success" })],
+      () => csvResponse("header\r\n"),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByRole("table");
+
+    await user.selectOptions(screen.getByLabelText("Статус"), "success");
+    await screen.findByRole("table");
+    await user.click(screen.getByRole("button", { name: "Скачать CSV" }));
+    await screen.findByRole("button", { name: "Скачать CSV" });
+
+    const exportCall = fetchMock.mock.calls.find(
+      ([url]) => new URL(String(url)).pathname === AUDIT_EXPORT_PATHNAME,
+    );
+    const exportUrl = new URL(String(exportCall![0]));
+    expect(exportUrl.searchParams.get("status")).toBe("success");
+    expect(exportUrl.searchParams.has("errors_only")).toBe(false);
+  });
+
+  it("кнопка отключена во время формирования CSV и текст меняется", async () => {
+    const deferred = createDeferred<Response>();
+    const fetchMock = mockAuditApiWithExport([], () => deferred.promise);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("По заданному фильтру записи аудита не найдены.");
+
+    const button = screen.getByRole("button", { name: "Скачать CSV" });
+    await user.click(button);
+
+    expect(await screen.findByRole("button", { name: "Формируется CSV…" })).toBeDisabled();
+
+    deferred.resolve(csvResponse("header\r\n"));
+    await screen.findByRole("button", { name: "Скачать CSV" });
+    expect(screen.getByRole("button", { name: "Скачать CSV" })).not.toBeDisabled();
+  });
+
+  it("двойной клик не запускает два экспорт-запроса", async () => {
+    const deferred = createDeferred<Response>();
+    let exportCalls = 0;
+    const fetchMock = mockAuditApiWithExport([], () => {
+      exportCalls += 1;
+      return deferred.promise;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("По заданному фильтру записи аудита не найдены.");
+
+    const button = screen.getByRole("button", { name: "Скачать CSV" });
+    await user.click(button);
+    await user.click(button);
+
+    expect(exportCalls).toBe(1);
+
+    deferred.resolve(csvResponse("header\r\n"));
+    await screen.findByRole("button", { name: "Скачать CSV" });
+  });
+
+  it("успешный экспорт запускает скачивание ровно один раз и не показывает ошибку", async () => {
+    vi.stubGlobal("fetch", mockAuditApiWithExport([], () => csvResponse("header\r\n")));
+
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("По заданному фильтру записи аудита не найдены.");
+
+    await user.click(screen.getByRole("button", { name: "Скачать CSV" }));
+    await screen.findByRole("button", { name: "Скачать CSV" });
+
+    // Positive assertion: the download was actually triggered exactly once —
+    // not merely "no error appeared", which would also pass if downloadBlob
+    // were never called at all.
+    expect(anchorClickSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Не удалось сформировать CSV-файл")).not.toBeInTheDocument();
+
+    // No further download after the pending promise has already settled.
+    await flushMicrotasks();
+    expect(anchorClickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("ошибка экспорта показывается отдельно и не стирает уже загруженную таблицу", async () => {
+    const fetchMock = mockAuditApiWithExport(
+      [buildAuditRun({ id: "audit-ok", status: "success" })],
+      () => jsonResponse({ detail: "Внутренняя ошибка сервера" }, 500),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    renderPage();
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("audit-ok")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Скачать CSV" }));
+
+    expect(await screen.findByText("Не удалось сформировать CSV-файл")).toBeInTheDocument();
+    expect(screen.getByText("Внутренняя ошибка сервера")).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(within(screen.getByRole("table")).getByText("audit-ok")).toBeInTheDocument();
+  });
+
+  it("повторный клик после ошибки экспорта работает (retry)", async () => {
+    let exportCalls = 0;
+    const fetchMock = mockAuditApiWithExport([], () => {
+      exportCalls += 1;
+      if (exportCalls === 1) return jsonResponse({ detail: "Внутренняя ошибка сервера" }, 500);
+      return csvResponse("header\r\n");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("По заданному фильтру записи аудита не найдены.");
+
+    await user.click(screen.getByRole("button", { name: "Скачать CSV" }));
+    await screen.findByText("Не удалось сформировать CSV-файл");
+
+    await user.click(screen.getByRole("button", { name: "Скачать CSV" }));
+    await screen.findByRole("button", { name: "Скачать CSV" });
+
+    expect(screen.queryByText("Не удалось сформировать CSV-файл")).not.toBeInTheDocument();
+    expect(exportCalls).toBe(2);
+  });
+
+  it("unmount во время формирования CSV: скачивание не запускается, state не обновляется, warning не выводится", async () => {
+    const deferred = createDeferred<Response>();
+    const fetchMock = mockAuditApiWithExport([], () => deferred.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const user = userEvent.setup();
+    const view = renderPage();
+    await screen.findByText("По заданному фильтру записи аудита не найдены.");
+
+    await user.click(screen.getByRole("button", { name: "Скачать CSV" }));
+    await screen.findByRole("button", { name: "Формируется CSV…" });
+
+    view.unmount();
+
+    // The export request resolves only after unmount — the pending request
+    // is allowed to complete, but its result must be ignored: no download,
+    // no state update, no React "state update on an unmounted component"
+    // warning.
+    deferred.resolve(csvResponse("header\r\n"));
+    await flushMicrotasks();
+
+    expect(anchorClickSpy).not.toHaveBeenCalled();
+    const stateUpdateWarning = consoleErrorSpy.mock.calls.some(([message]) =>
+      String(message).includes("unmounted component"),
+    );
+    expect(stateUpdateWarning).toBe(false);
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("unmount во время формирования CSV: последующий reject не запускает скачивание и не выводит warning", async () => {
+    const deferred = createDeferred<Response>();
+    const fetchMock = mockAuditApiWithExport([], () => deferred.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const user = userEvent.setup();
+    const view = renderPage();
+    await screen.findByText("По заданному фильтру записи аудита не найдены.");
+
+    await user.click(screen.getByRole("button", { name: "Скачать CSV" }));
+    await screen.findByRole("button", { name: "Формируется CSV…" });
+
+    view.unmount();
+
+    // The export request rejects only after unmount — this must not throw
+    // out of the test (the rejection is awaited via flushMicrotasks below,
+    // so it can never surface as an unhandled rejection), must not trigger a
+    // download, and must not attempt any post-unmount UI update.
+    deferred.reject(new Error("boom: late rejection after unmount"));
+    await flushMicrotasks();
+
+    expect(anchorClickSpy).not.toHaveBeenCalled();
+    const stateUpdateWarning = consoleErrorSpy.mock.calls.some(([message]) =>
+      String(message).includes("unmounted component"),
+    );
+    expect(stateUpdateWarning).toBe(false);
+
+    consoleErrorSpy.mockRestore();
   });
 });

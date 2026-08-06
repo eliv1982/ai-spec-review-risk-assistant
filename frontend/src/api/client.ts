@@ -1,4 +1,5 @@
 import { ApiBaseUrlConfigError, normalizeApiBaseUrl } from "./baseUrl";
+import { extractContentDispositionFilename, sanitizeFilename } from "../utils/download";
 import type { ApiErrorBody } from "../types/api";
 
 export function getApiBaseUrl(): string {
@@ -168,6 +169,42 @@ function invalidResponseError(status: number, cause: unknown): ApiError {
   });
 }
 
+/** Resolves the configured base URL and issues the `fetch`, translating a
+ * misconfigured `VITE_API_BASE_URL` or a network-level failure into the same
+ * safe `ApiError` shape `request()` has always thrown — shared by `request()`
+ * (JSON) and `requestBlob()` (CSV export) so both transports fail exactly
+ * the same way for exactly the same reasons. */
+async function fetchWithBaseUrl(
+  path: string,
+  init: RequestInit | undefined,
+  extraHeaders: HeadersInit,
+): Promise<Response> {
+  let baseUrl: string;
+  try {
+    baseUrl = getApiBaseUrl();
+  } catch (cause) {
+    if (cause instanceof ApiBaseUrlConfigError) {
+      throw new ApiError({ kind: "config", message: CONFIG_ERROR_MESSAGE, detail: cause });
+    }
+    throw cause;
+  }
+  const url = `${baseUrl}${path}`;
+
+  try {
+    return await fetch(url, {
+      ...init,
+      headers: { ...extraHeaders, ...init?.headers },
+    });
+  } catch (cause) {
+    if (isAbortError(cause)) throw cause;
+    throw new ApiError({
+      kind: "network",
+      message: "Не удалось соединиться с сервером. Проверьте подключение и адрес backend.",
+      detail: cause,
+    });
+  }
+}
+
 /**
  * Generic request helper. The response body is parsed strictly as `unknown`
  * first — never blindly cast with `as T` — and then handed to the
@@ -182,35 +219,10 @@ export async function request<T>(
   init: RequestInit | undefined,
   validate: (data: unknown) => T,
 ): Promise<T> {
-  let baseUrl: string;
-  try {
-    baseUrl = getApiBaseUrl();
-  } catch (cause) {
-    if (cause instanceof ApiBaseUrlConfigError) {
-      throw new ApiError({ kind: "config", message: CONFIG_ERROR_MESSAGE, detail: cause });
-    }
-    throw cause;
-  }
-  const url = `${baseUrl}${path}`;
-  let response: Response;
-
-  try {
-    response = await fetch(url, {
-      ...init,
-      headers: {
-        Accept: "application/json",
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...init?.headers,
-      },
-    });
-  } catch (cause) {
-    if (isAbortError(cause)) throw cause;
-    throw new ApiError({
-      kind: "network",
-      message: "Не удалось соединиться с сервером. Проверьте подключение и адрес backend.",
-      detail: cause,
-    });
-  }
+  const response = await fetchWithBaseUrl(path, init, {
+    Accept: "application/json",
+    ...(init?.body ? { "Content-Type": "application/json" } : {}),
+  });
 
   if (!response.ok) {
     throw await buildHttpError(response);
@@ -233,4 +245,65 @@ export async function request<T>(
   } catch (cause) {
     throw invalidResponseError(response.status, cause);
   }
+}
+
+/**
+ * Reads a `Response` body as a `Blob`, translating a stream/network failure
+ * into a safe `ApiError` the same way `readResponseText` does for JSON
+ * responses. An abort is rethrown unchanged.
+ */
+async function readResponseBlob(response: Response): Promise<Blob> {
+  try {
+    return await response.blob();
+  } catch (cause) {
+    if (isAbortError(cause)) throw cause;
+    throw new ApiError({
+      kind: "network",
+      message: BODY_READ_FAILURE_MESSAGE,
+      detail: cause,
+    });
+  }
+}
+
+export interface CsvExportResult {
+  blob: Blob;
+  filename: string;
+}
+
+/**
+ * Fetches a CSV export endpoint and returns the raw `Blob` plus a safe
+ * filename. Unlike `request()`, the body is never parsed as JSON or handed
+ * to a runtime validator — a CSV response is opaque binary content as far as
+ * this app is concerned. Non-2xx responses still go through `buildHttpError`
+ * (the backend reports export failures as a normal JSON error body), so
+ * error handling stays identical to every other endpoint.
+ *
+ * The filename is taken from the response's `Content-Disposition` header
+ * when present and safe (`extractContentDispositionFilename` +
+ * `sanitizeFilename`). `fallbackFilename` is itself run through
+ * `sanitizeFilename` first (`safeFallback`) before use — callers only ever
+ * pass this app's own static literals, but the header comes from the wire
+ * and nothing downstream should be able to reintroduce a path separator or
+ * control character just because the header was missing or unparseable.
+ * `safeFallback` is used whenever the header is missing, no filename could
+ * be extracted, or the extracted value sanitizes down to nothing.
+ */
+export async function requestCsvExport(
+  path: string,
+  fallbackFilename: string,
+  signal?: AbortSignal,
+): Promise<CsvExportResult> {
+  const response = await fetchWithBaseUrl(path, { method: "GET", signal }, {});
+
+  if (!response.ok) {
+    throw await buildHttpError(response);
+  }
+
+  const blob = await readResponseBlob(response);
+  const safeFallback = sanitizeFilename(fallbackFilename);
+  const headerValue = response.headers.get("content-disposition");
+  const extracted = extractContentDispositionFilename(headerValue);
+  const filename = extracted ? sanitizeFilename(extracted, safeFallback) : safeFallback;
+
+  return { blob, filename };
 }

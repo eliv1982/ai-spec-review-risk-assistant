@@ -1,7 +1,8 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { listReviews } from "../api/reviews";
+import { exportReviewsCsv, listReviews } from "../api/reviews";
 import { ApiError, isAbortError } from "../api/client";
+import { downloadBlob } from "../utils/download";
 import type { PaginatedResponse, ReviewResponse } from "../types/api";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { LoadingIndicator } from "../components/LoadingIndicator";
@@ -18,6 +19,8 @@ type ListState =
   | { status: "error"; error: ApiError }
   | { status: "loaded"; data: PaginatedResponse<ReviewResponse> };
 
+type ExportState = { status: "idle" } | { status: "pending" } | { status: "error"; error: ApiError };
+
 export function ReviewsDashboardPage() {
   const [documentIdInput, setDocumentIdInput] = useState("");
   const [needsReviewInput, setNeedsReviewInput] = useState<NeedsReviewFilter>("all");
@@ -28,6 +31,17 @@ export function ReviewsDashboardPage() {
   const [reloadToken, setReloadToken] = useState(0);
 
   const [state, setState] = useState<ListState>({ status: "loading" });
+  const [exportState, setExportState] = useState<ExportState>({ status: "idle" });
+  // Guards the async export handler (a button click, not an effect) against
+  // triggering a download or updating state after this component has
+  // unmounted.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -103,6 +117,27 @@ export function ReviewsDashboardPage() {
     setReloadToken((token) => token + 1);
   }
 
+  async function handleExportCsv() {
+    if (exportState.status === "pending") return;
+    setExportState({ status: "pending" });
+    try {
+      const { blob, filename } = await exportReviewsCsv({
+        documentId: appliedDocumentId,
+        needsReview: appliedNeedsReview,
+      });
+      if (!isMountedRef.current) return;
+      downloadBlob(blob, filename);
+      setExportState({ status: "idle" });
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      const apiError =
+        err instanceof ApiError
+          ? err
+          : new ApiError({ kind: "network", message: "Не удалось сформировать CSV-файл." });
+      setExportState({ status: "error", error: apiError });
+    }
+  }
+
   return (
     <main className="page">
       <div className="container-wide">
@@ -145,6 +180,21 @@ export function ReviewsDashboardPage() {
             </button>
           </div>
         </form>
+
+        <div className="form-actions">
+          <button
+            type="button"
+            className="button button-secondary"
+            onClick={handleExportCsv}
+            disabled={exportState.status === "pending"}
+          >
+            {exportState.status === "pending" ? "Формируется CSV…" : "Скачать CSV"}
+          </button>
+        </div>
+
+        {exportState.status === "error" && (
+          <ErrorBanner title="Не удалось сформировать CSV-файл" message={exportState.error.message} />
+        )}
 
         {state.status === "loading" && <LoadingIndicator message="Загружаем список проверок…" />}
 

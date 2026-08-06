@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, getApiBaseUrl, isAbortError, request } from "./client";
+import { ApiError, getApiBaseUrl, isAbortError, request, requestCsvExport } from "./client";
 import { parseDocumentResponse, parseReviewResponse } from "./validators";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -416,5 +416,78 @@ describe("request", () => {
       expect((error as ApiError).kind).toBe("config");
       expect((error as ApiError).message).toBe("Некорректно настроен адрес API.");
     });
+  });
+});
+
+// -------------------------------------------------------------------------
+// requestCsvExport: fallbackFilename must itself always be sanitized before
+// use, since it can be built from untrusted route data (e.g. a review id
+// embedded by a caller like `review-${reviewId}.csv` — see reviews.test.ts)
+// and a missing/unparseable Content-Disposition header must never let a raw,
+// unsafe fallback reach downloadBlob().
+// -------------------------------------------------------------------------
+describe("requestCsvExport", () => {
+  function csvResponse(body: string, headers: Record<string, string> = {}, status = 200): Response {
+    return new Response(body, {
+      status,
+      headers: { "Content-Type": "text/csv; charset=utf-8", ...headers },
+    });
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("санитизирует опасный fallbackFilename при отсутствующем заголовке Content-Disposition", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(csvResponse("data"));
+
+    const result = await requestCsvExport("/reviews/export", "../../etc/passwd.csv");
+    expect(result.filename).not.toContain("/");
+    expect(result.filename).not.toContain("\\");
+    expect(result.filename.length).toBeGreaterThan(0);
+  });
+
+  it("санитизирует опасный fallbackFilename, когда заголовок не содержит filename", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(csvResponse("data", { "Content-Disposition": "attachment" }));
+
+    const result = await requestCsvExport("/reviews/export", "..\\..\\etc\\passwd.csv");
+    expect(result.filename).not.toContain("/");
+    expect(result.filename).not.toContain("\\");
+    expect(result.filename.length).toBeGreaterThan(0);
+  });
+
+  it("использует санитизированный fallback, если extracted-значение из заголовка очищается до пустой строки", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(
+      csvResponse("data", { "Content-Disposition": 'attachment; filename="///"' }),
+    );
+
+    const result = await requestCsvExport("/reviews/export", "../secrets.csv");
+    expect(result.filename).not.toContain("/");
+    expect(result.filename).not.toContain("\\");
+    expect(result.filename.length).toBeGreaterThan(0);
+  });
+
+  it("санитизирует управляющие символы в fallbackFilename", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(csvResponse("data"));
+
+    const result = await requestCsvExport("/reviews/export", "review-\u0000\u001f.csv");
+    expect(result.filename).not.toContain("\u0000");
+    expect(result.filename).not.toContain("\u001f");
+  });
+
+  it("не изменяет корректный статический fallbackFilename", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(csvResponse("data"));
+
+    const result = await requestCsvExport("/reviews/export", "reviews-export.csv");
+    expect(result.filename).toBe("reviews-export.csv");
   });
 });

@@ -1,7 +1,7 @@
 from typing import Any, Optional, Sequence
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models import Review
 
@@ -36,6 +36,25 @@ class ReviewRepository:
     def get_by_id(self, review_id: str) -> Optional[Review]:
         return self.db.get(Review, review_id)
 
+    def _filters(
+        self,
+        *,
+        document_id: Optional[str],
+        needs_review: Optional[bool],
+        confidence: Optional[str],
+        readiness: Optional[str],
+    ) -> list[Any]:
+        filters: list[Any] = []
+        if document_id is not None:
+            filters.append(Review.document_id == document_id)
+        if needs_review is not None:
+            filters.append(Review.needs_review == int(needs_review))
+        if confidence is not None:
+            filters.append(Review.confidence == confidence)
+        if readiness is not None:
+            filters.append(Review.readiness == readiness)
+        return filters
+
     def list(
         self,
         *,
@@ -46,15 +65,12 @@ class ReviewRepository:
         limit: int,
         offset: int,
     ) -> tuple[Sequence[Review], int]:
-        filters = []
-        if document_id is not None:
-            filters.append(Review.document_id == document_id)
-        if needs_review is not None:
-            filters.append(Review.needs_review == int(needs_review))
-        if confidence is not None:
-            filters.append(Review.confidence == confidence)
-        if readiness is not None:
-            filters.append(Review.readiness == readiness)
+        filters = self._filters(
+            document_id=document_id,
+            needs_review=needs_review,
+            confidence=confidence,
+            readiness=readiness,
+        )
 
         total = self.db.scalar(select(func.count()).select_from(Review).where(*filters)) or 0
 
@@ -67,3 +83,31 @@ class ReviewRepository:
         )
         items = self.db.scalars(stmt).all()
         return items, total
+
+    def list_all_for_export(
+        self,
+        *,
+        document_id: Optional[str] = None,
+        needs_review: Optional[bool] = None,
+        confidence: Optional[str] = None,
+        readiness: Optional[str] = None,
+    ) -> Sequence[Review]:
+        """Same filters and ordering as `list`, without `limit`/`offset` — used
+        only by CSV export, never by the paginated list endpoint. Eager-loads
+        `document` via a single JOIN (`joinedload`) so a CSV column that needs
+        the parent document's title never triggers a per-row query.
+        """
+        filters = self._filters(
+            document_id=document_id,
+            needs_review=needs_review,
+            confidence=confidence,
+            readiness=readiness,
+        )
+
+        stmt = (
+            select(Review)
+            .where(*filters)
+            .order_by(Review.created_at.desc(), Review.id.desc())
+            .options(joinedload(Review.document))
+        )
+        return self.db.scalars(stmt).unique().all()

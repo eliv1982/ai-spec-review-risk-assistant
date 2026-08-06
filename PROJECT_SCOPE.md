@@ -11,7 +11,7 @@ Build a production-style MVP for reviewing technical specifications, project req
 - deterministic validation and quality control
 - manual-review workflow with `needs_review` and reason codes
 - document, review and audit views
-- JSON export
+- CSV export
 - SQLite persistence
 - Docker-based reproducible startup
 - automated tests and 10 test documents

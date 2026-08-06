@@ -35,7 +35,7 @@ Each new document-backed review attempt re-sets `documents.status` from its own 
 | --- | --- |
 | `success` | The action completed without a technical error and manual review is not required |
 | `needs_review` | The model response was successfully parsed and validated, but the final deterministic result requires manual review |
-| `error` | Model, transport, JSON parsing, schema validation, persistence, or export failure occurred, including cases where a safe fallback was returned or persisted |
+| `error` | Model, transport, JSON parsing, schema validation, or persistence failure occurred, including cases where a safe fallback was returned or persisted |
 
 Status / `error` field invariants (application-level validation; not separate columns or tables):
 
@@ -174,8 +174,9 @@ Confidence, document readiness, severity, categories, and review reason codes ar
 | `document.create` | `document` | created document id |
 | `document.review` (successful or fallback-persisted) | `review` | created review id |
 | `document.review` (failure before a review exists) | `document` | document id |
-| `review.export` | `review` | review id |
 | `ai.review` | `NULL` | `NULL` |
+
+CSV export (`GET /api/reviews/export`, `GET /api/reviews/{review_id}/export`, `GET /api/audit-runs/export`) is not in this table because it is a read-only `GET` and never writes an `audit_runs` row.
 
 ### AI-invoking reproducibility metadata
 

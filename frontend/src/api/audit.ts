@@ -1,4 +1,4 @@
-import { request } from "./client";
+import { request, requestCsvExport, type CsvExportResult } from "./client";
 import { parseAuditRunResponse, parsePaginatedResponse } from "./validators";
 import type { AuditRunResponse, AuditStatus, PaginatedResponse } from "../types/api";
 
@@ -26,4 +26,24 @@ export function listAuditRuns(
     { method: "GET", signal },
     (data) => parsePaginatedResponse(data, parseAuditRunResponse, "AuditRunsList"),
   );
+}
+
+export interface ExportAuditRunsCsvParams {
+  status?: AuditStatus;
+  errorsOnly?: boolean;
+}
+
+/** GET /api/audit-runs/export (docs/API_CONTRACTS.md). Same filters as
+ * `listAuditRuns`, but never paginated (no `limit`/`offset`) — exports every
+ * matching row as CSV. */
+export function exportAuditRunsCsv(
+  params: ExportAuditRunsCsvParams,
+  signal?: AbortSignal,
+): Promise<CsvExportResult> {
+  const query = new URLSearchParams();
+  if (params.status) query.set("status", params.status);
+  if (params.errorsOnly) query.set("errors_only", "true");
+  const qs = query.toString();
+
+  return requestCsvExport(`/audit-runs/export${qs ? `?${qs}` : ""}`, "audit-runs-export.csv", signal);
 }

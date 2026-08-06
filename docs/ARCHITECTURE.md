@@ -87,7 +87,7 @@ flowchart LR
 7. On model, transport, JSON, or schema failure, the system builds a safe `FinalReview` fallback (failure-provenance reason codes only; content-derived QC is not inferred from synthetic fallback fields).
 8. A `FinalReview` from a successfully parsed draft is stored; document `status` becomes `reviewed` (`Review.error=null`, audit `status="success"` or `"needs_review"`). A safe `FinalReview` fallback (a *technical* failure, safely contained) is also stored, but document `status` becomes `review_failed`, `Review.error` is a non-empty sanitized summary, and audit `status="error"` with the same non-empty sanitized `error` — a persisted fallback is never reported as `reviewed`. Review, status update, and audit commit atomically in both cases. If no usable review can be stored at all, the failed review transaction rolls back and a recovery transaction sets `status=review_failed` and writes the error audit row.
 9. Frontend shows the review; uncertain cases appear with `needs_review=true` and `reason_codes`. `model_needs_review` is never exposed.
-10. User may export the review as JSON (`GET /api/reviews/{review_id}/export`). Export writes its audit row before returning the response.
+10. User may export a review, the review list, or the audit journal as CSV (`GET /api/reviews/export`, `GET /api/reviews/{review_id}/export`, `GET /api/audit-runs/export`) — read-only `GET` requests that reuse the same filters/ordering as their list endpoints and never write an `audit_runs` row.
 
 Standalone AI demonstration:
 
@@ -155,7 +155,7 @@ Writes `audit_runs` for every key action. Records action name, entity references
 
 ### Export service
 
-Produces a JSON export of a stored review (and related document metadata as defined in the API contract). Read-only with respect to review content; does not re-run the LLM. Writes the audit row before returning the export response.
+Produces CSV exports for three read-only `GET` endpoints — the review list, a single review (`Поле`/`Значение` layout with the full `FinalReview` as one JSON cell), and the audit journal — reusing each list endpoint's own filters and ordering, without pagination. Read-only with respect to review/audit content; does not re-run the LLM and never writes an `audit_runs` row: CSV export is not part of the audited action set, and an export failure is reported as a normal HTTP error response, never as an audit event.
 
 ## Frontend sections
 
@@ -169,7 +169,7 @@ List stored reviews. Filter by `needs_review`, `confidence`, `readiness` (docume
 
 ### Review Details
 
-Show full structured review: summary, risks, missing requirements, contradictions, questions, acceptance criteria, confidence, readiness, `needs_review`, `reason_codes`, and any error. Offer JSON export.
+Show full structured review: summary, risks, missing requirements, contradictions, questions, acceptance criteria, confidence, readiness, `needs_review`, `reason_codes`, and any error. Offer CSV export.
 
 ### Audit
 
@@ -185,7 +185,7 @@ List and inspect `audit_runs`. Filter by `status`, `action`, and `errors_only` (
 | No usable review can be stored | Roll back the failed review transaction. Use a **separate, best-effort recovery transaction** to set `document.status="review_failed"` and write the error audit row (`entity_type="document"`, `entity_id=<document id>`); the original failure is re-raised either way. |
 | Required audit cannot be stored | The audited action must not be reported as successful. |
 | `ai.review` | Write the audit row before returning a successful or fallback HTTP response. |
-| `review.export` | Write the audit row before returning the export response. |
+| CSV export (`/reviews/export`, `/reviews/{review_id}/export`, `/audit-runs/export`) | Read-only `GET`; never writes an `audit_runs` row, on success or failure. Not part of the audited action set. |
 
 The recovery transaction above is **best-effort**, not a guarantee: if the underlying database is itself unavailable (or otherwise rejects the recovery write, including its own commit), the recovery `document.status`/error-audit write can itself fail. That secondary failure is swallowed so it never replaces or hides the original error — the original exception is always what propagates — but it means a repeat database failure at recovery time can leave `document.status` at its prior value with no error audit row for that attempt, rather than a guaranteed `review_failed` + audit trail.
 
@@ -213,7 +213,7 @@ Exact audit statuses:
 | --- | --- |
 | `success` | The action completed without a technical error and manual review is not required |
 | `needs_review` | The model response was successfully parsed and validated, but the final deterministic result requires manual review |
-| `error` | Model, transport, JSON parsing, schema validation, persistence, or export failure occurred, including cases where a safe fallback was returned or persisted |
+| `error` | Model, transport, JSON parsing, schema validation, or persistence failure occurred, including cases where a safe fallback was returned or persisted |
 
 Status / `error` field invariants:
 
@@ -231,8 +231,9 @@ Entity mapping:
 | `document.create` | `document` | created document id |
 | `document.review` (successful or fallback-persisted) | `review` | created review id |
 | `document.review` (failure before a review exists) | `document` | document id |
-| `review.export` | `review` | review id |
 | `ai.review` | `null` | `null` |
+
+CSV export (`/reviews/export`, `/reviews/{review_id}/export`, `/audit-runs/export`) is not in this table because it never writes an `audit_runs` row — see the transaction boundaries table above.
 
 ### Reproducibility version literals
 
