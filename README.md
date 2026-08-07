@@ -1,17 +1,137 @@
 # AI Specification Review & Risk Assistant
 
-An assistant that reviews technical specifications, project requirements, feature requests, automation briefs, and business requirements, combining LLM-based analysis with deterministic validation and quality control to flag risks and route uncertain cases for manual review.
+Ассистент проверяет технические спецификации, требования к проектам, feature request'ы,
+автоматизационные брифы и бизнес-требования. Анализ LLM дополняется детерминированной
+валидацией и контролем качества, чтобы отмечать риски и направлять сомнительные случаи
+на ручную проверку.
 
-Status: In development
+Статус: в разработке.
 
-## Repository Structure
+## Структура репозитория
 
 ```
-backend/      Backend service (FastAPI, SQLAlchemy, SQLite)
-frontend/     Frontend application (React/Vite)
-docs/         Project documentation
-tests_data/   Sample and test documents
+backend/      backend-сервис (FastAPI, SQLAlchemy, SQLite)
+frontend/     frontend-приложение (React/Vite)
+docs/         документация проекта
+tests_data/   примеры и тестовые документы
 ```
+
+## Запуск в Docker
+
+Docker-развёртывание состоит из двух контейнеров:
+
+- `backend` запускает один production-процесс Uvicorn на `0.0.0.0:8000`; один worker
+  выбран намеренно для текущей SQLite-архитектуры;
+- `frontend` собирает Vite-приложение, раздаёт статические файлы через Caddy и
+  проксирует `/api` во внутренний контейнер backend. В production bundle используется
+  относительный адрес `/api`, поэтому в него не попадают `localhost` или домен VPS.
+
+Backend не публикует порт на хост. Для production только `frontend` подключается к
+внешней сети Traefik. Nginx не используется: Caddy нужен только как компактный сервер
+статических файлов с SPA fallback и внутренним API proxy.
+
+### Переменные окружения
+
+Скопируйте шаблон и заполните локальный `.env` (файл игнорируется Git):
+
+```bash
+cp .env.example .env
+```
+
+| Переменная | Назначение |
+| --- | --- |
+| `OPENAI_API_KEY` | Секретный ключ OpenAI. Для запуска и health check может быть пустым; для реальной AI-проверки должен быть задан. |
+| `OPENAI_MODEL` | Модель OpenAI для AI-проверок. |
+| `DATABASE_URL` | URL SQLite. Значение `sqlite:///./data/app.db` сохраняет БД в подключённом Docker volume. |
+| `BACKEND_CORS_ORIGINS` | Разрешённые origin'ы через запятую. Для Docker-запуска запросы same-origin; значение важно для отдельного Vite dev server или другого origin. |
+| `APP_PORT` | Локальный порт frontend, по умолчанию `8080`; публикуется только на `127.0.0.1`. |
+| `APP_HOST` | Production hostname без схемы и пути, например `app.example.com`. |
+| `TRAEFIK_NETWORK` | Имя уже существующей внешней Docker-сети Traefik. |
+| `TRAEFIK_ENTRYPOINT` | HTTPS entrypoint существующего Traefik, обычно `websecure`. |
+| `TRAEFIK_MIDDLEWARES` | Необязательная ссылка на уже настроенный middleware Traefik для защиты доступа. |
+
+Секреты передаются backend только через environment контейнера. Они не используются как
+аргументы сборки и не копируются в образы.
+
+### Локальный Docker-запуск
+
+```bash
+docker compose --env-file .env \
+  -f docker-compose.yml -f docker-compose.local.yml \
+  up -d --build
+```
+
+Проверка backend через внутренний proxy и проверка frontend:
+
+```bash
+curl -fsS http://127.0.0.1:8080/api/health
+curl -I http://127.0.0.1:8080/
+```
+
+Первый запрос должен вернуть `{"status":"ok"}`, второй — успешный HTTP-статус.
+
+### Production-запуск за существующим Traefik
+
+На VPS должны заранее существовать DNS-запись, HTTPS entrypoint/certificate resolver
+Traefik и внешняя Docker-сеть с именем из `TRAEFIK_NETWORK`. Репозиторий их не создаёт.
+После заполнения production `.env` конфигурацию можно проверить и запустить так:
+
+```bash
+docker compose --env-file .env \
+  -f docker-compose.yml -f docker-compose.traefik.yml \
+  config -q
+
+docker compose --env-file .env \
+  -f docker-compose.yml -f docker-compose.traefik.yml \
+  up -d --build
+```
+
+Traefik направляет весь hostname на Caddy; Caddy отдаёт SPA и проксирует `/api` в
+backend. TLS включён на router, но выпуск и хранение сертификата остаются ответственностью
+существующей инфраструктуры Traefik. Проверка после запуска:
+
+```bash
+curl -fsS https://app.example.com/api/health
+curl -I https://app.example.com/
+```
+
+В командах проверки замените `app.example.com` значением `APP_HOST`.
+
+### Защита публичного доступа
+
+Аутентификация в приложение намеренно не добавляется. Если доступ должен быть закрыт,
+сначала создайте Basic Auth, forward-auth или другой middleware в существующей
+конфигурации Traefik. Затем укажите только его ссылку, например
+`TRAEFIK_MIDDLEWARES=app-auth@file`, и добавьте overlay:
+
+```bash
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f docker-compose.traefik.yml \
+  -f docker-compose.traefik-auth.yml \
+  up -d --build
+```
+
+Хеши паролей и другие credentials хранятся вне репозитория, на стороне Traefik.
+
+### SQLite и управление контейнерами
+
+Каталог `/app/data` backend подключён к именованному volume `app_data`, поэтому файл
+SQLite переживает пересоздание и перезапуск контейнеров. Обычный `down` volume не удаляет:
+
+```bash
+docker compose --env-file .env \
+  -f docker-compose.yml -f docker-compose.traefik.yml restart
+
+docker compose --env-file .env \
+  -f docker-compose.yml -f docker-compose.traefik.yml down
+```
+
+Команда `down -v` удалит volume вместе с базой и здесь намеренно не используется.
+Резервное копирование volume остаётся ручной серверной операцией.
+
+В состав развёртывания намеренно не входят собственный Traefik, сертификаты, DNS,
+прикладная аутентификация, PostgreSQL, Kubernetes, CI/CD и мониторинг.
 
 ## Frontend — локальный запуск
 
@@ -73,7 +193,8 @@ VITE_API_BASE_URL=http://127.0.0.1:8000/api
 
 Допустимо указывать как origin backend (`http://127.0.0.1:8000`), так и полный адрес с
 `/api` (`http://127.0.0.1:8000/api`), в том числе с повторёнными сегментами `/api/api`
-и с trailing slash или без него. Значение нормализуется
+и с trailing slash или без него. Для Docker-развёртывания также поддерживается строго
+same-origin значение `/api` (и его повторы). Значение нормализуется
 (`frontend/src/api/baseUrl.ts`) так, чтобы итоговый адрес всегда заканчивался ровно
 одним `/api` без задвоенных слэшей, а hostname (даже содержащий подстроку `api`,
 например `api-host.example`) никогда не изменяется.
@@ -84,7 +205,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000/api
 * query string (`?...`) и fragment (`#...`) в адресе;
 * произвольный посторонний путь, отличный от повторов `/api` (например `/backend`,
   `/v1`);
-* относительный адрес (без схемы и хоста) или строка, не являющаяся URL;
+* произвольный относительный адрес, отличный от `/api`, или строка, не являющаяся URL;
 * схема, отличная от `http`/`https`.
 
 ### Запуск

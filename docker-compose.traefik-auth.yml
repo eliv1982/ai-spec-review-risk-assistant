@@ -1,0 +1,4 @@
+services:
+  frontend:
+    labels:
+      traefik.http.routers.ai-spec-review.middlewares: "${TRAEFIK_MIDDLEWARES:?TRAEFIK_MIDDLEWARES is required}"

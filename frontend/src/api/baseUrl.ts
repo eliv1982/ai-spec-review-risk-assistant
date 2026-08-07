@@ -1,12 +1,13 @@
 /** Falls back to the local backend's default `uvicorn app.main:app` address
- * (see backend/README.md) when `VITE_API_BASE_URL` is not set. */
-const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000/api";
+ * in development and to the reverse proxy's same-origin path in production. */
+const DEFAULT_API_BASE_URL = import.meta.env.DEV ? "http://127.0.0.1:8000/api" : "/api";
 
 const API_SEGMENT = "api";
 
 /**
  * Thrown by `normalizeApiBaseUrl` for a `VITE_API_BASE_URL` value that isn't
- * a supported backend base URL. Carries the raw offending value for logging;
+ * a supported backend base URL. A same-origin `/api` path is accepted for the
+ * production reverse-proxy deployment. Carries the raw offending value for logging;
  * `client.ts` catches this and shows a safe Russian configuration message
  * instead of a raw stack trace.
  */
@@ -41,17 +42,25 @@ function isSupportedApiPathname(pathname: string): boolean {
  * leading-slash path (e.g. `/documents`) to the result without producing
  * `/api/api`, a missing `/api`, or doubled trailing slashes.
  *
- * Accepts an absolute `http(s)` URL that is either origin-only
+ * Accepts the same-origin `/api` path used by the production container, or an
+ * absolute `http(s)` URL that is either origin-only
  * (`http://host:8000`) or ends in one-or-more repeated `/api` segments
  * (`http://host:8000/api`, `.../api/api`, ...), with or without trailing
- * slashes. Rejects (throws `ApiBaseUrlConfigError`) anything else: relative
- * URLs, non-`http(s)` schemes, a query string or fragment, or a pathname
+ * slashes. Rejects (throws `ApiBaseUrlConfigError`) anything else: arbitrary
+ * relative URLs, non-`http(s)` schemes, a query string or fragment, or a pathname
  * that isn't purely `/api` repeats — these are treated as misconfiguration,
  * not silently coerced into a possibly-wrong endpoint.
  */
 export function normalizeApiBaseUrl(rawValue: string | undefined | null): string {
   const trimmed = (rawValue ?? "").trim();
   const source = trimmed || DEFAULT_API_BASE_URL;
+
+  // The production container serves the SPA and proxies the API on one origin.
+  // Keep this narrowly scoped to the same supported `/api` path shape; arbitrary
+  // relative paths remain configuration errors.
+  if (/^\/api(?:\/api)*\/*$/.test(source)) {
+    return "/api";
+  }
 
   let parsed: URL;
   try {

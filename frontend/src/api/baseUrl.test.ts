@@ -12,6 +12,10 @@ describe("normalizeApiBaseUrl — supported values", () => {
     ["http://host:8000/api/api", "http://host:8000/api"],
     ["http://host:8000/api/api/", "http://host:8000/api"],
     ["http://host:8000/api/api//", "http://host:8000/api"],
+    ["/api", "/api"],
+    ["/api/", "/api"],
+    ["/api//", "/api"],
+    ["/api/api", "/api"],
   ])("нормализует %s в %s", (input, expected) => {
     expect(normalizeApiBaseUrl(input)).toBe(expected);
   });
@@ -55,7 +59,8 @@ describe("normalizeApiBaseUrl — rejected as configuration error", () => {
     ["http://host:8000/backend", "unsupported pathname"],
     ["http://host:8000/v1", "unsupported pathname"],
     ["http://host:8000/backend/api", "unsupported pathname (mixed)"],
-    ["/api", "relative URL"],
+    ["/backend", "unsupported relative path"],
+    ["//api", "protocol-relative URL"],
     ["not-a-url", "not a URL at all"],
     ["ftp://host:8000/api", "unsupported protocol"],
   ])("отклоняет %s (%s) как ApiBaseUrlConfigError", (input) => {

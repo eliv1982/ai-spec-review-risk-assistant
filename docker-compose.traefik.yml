@@ -1,0 +1,20 @@
+services:
+  frontend:
+    networks:
+      - default
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "${TRAEFIK_NETWORK:-traefik}"
+      traefik.http.routers.ai-spec-review.rule: "Host(`${APP_HOST:?APP_HOST is required}`)"
+      traefik.http.routers.ai-spec-review.entrypoints: "${TRAEFIK_ENTRYPOINT:-websecure}"
+      traefik.http.routers.ai-spec-review.tls: "true"
+      traefik.http.services.ai-spec-review.loadbalancer.server.port: "80"
+      traefik.http.services.ai-spec-review.loadbalancer.healthcheck.path: "/api/health"
+      traefik.http.services.ai-spec-review.loadbalancer.healthcheck.interval: "30s"
+      traefik.http.services.ai-spec-review.loadbalancer.healthcheck.timeout: "5s"
+
+networks:
+  traefik:
+    external: true
+    name: "${TRAEFIK_NETWORK:-traefik}"
