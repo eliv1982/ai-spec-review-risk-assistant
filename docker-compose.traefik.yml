@@ -9,6 +9,7 @@ services:
       traefik.http.routers.ai-spec-review.rule: "Host(`${APP_HOST:?APP_HOST is required}`)"
       traefik.http.routers.ai-spec-review.entrypoints: "${TRAEFIK_ENTRYPOINT:-websecure}"
       traefik.http.routers.ai-spec-review.tls: "true"
+      traefik.http.routers.ai-spec-review.tls.certresolver: "${TRAEFIK_CERTRESOLVER:-letsencrypt}"
       traefik.http.services.ai-spec-review.loadbalancer.server.port: "80"
       traefik.http.services.ai-spec-review.loadbalancer.healthcheck.path: "/api/health"
       traefik.http.services.ai-spec-review.loadbalancer.healthcheck.interval: "30s"

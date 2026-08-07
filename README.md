@@ -48,6 +48,7 @@ cp .env.example .env
 | `APP_HOST` | Production hostname без схемы и пути, например `app.example.com`. |
 | `TRAEFIK_NETWORK` | Имя уже существующей внешней Docker-сети Traefik. |
 | `TRAEFIK_ENTRYPOINT` | HTTPS entrypoint существующего Traefik, обычно `websecure`. |
+| `TRAEFIK_CERTRESOLVER` | Certificate resolver существующего Traefik, обычно `letsencrypt`. |
 | `TRAEFIK_MIDDLEWARES` | Необязательная ссылка на уже настроенный middleware Traefik для защиты доступа. |
 
 Секреты передаются backend только через environment контейнера. Они не используются как
