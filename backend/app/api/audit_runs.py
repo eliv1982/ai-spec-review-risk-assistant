@@ -10,6 +10,13 @@ from app.repositories.audit_repository import AuditRunRepository
 from app.schemas.audit import AuditRunResponse
 from app.schemas.common import PaginatedResponse
 from app.services.csv_export import build_csv_response, serialize_json_cell
+from app.services.display_labels import (
+    format_datetime_ru,
+    format_duration_ru,
+    label_audit_action,
+    label_audit_entity_type,
+    label_audit_status,
+)
 
 router = APIRouter()
 
@@ -87,13 +94,13 @@ def export_audit_runs(
     rows: list[list[str]] = [
         [
             "ID записи",
-            "Действие",
-            "Тип сущности",
-            "ID сущности",
+            "Операция",
+            "Тип объекта",
+            "ID объекта",
             "Статус",
-            "Длительность, мс",
+            "Длительность",
             "Ошибка",
-            "Дата создания",
+            "Дата и время",
             "Детали JSON",
         ]
     ]
@@ -102,13 +109,13 @@ def export_audit_runs(
         rows.append(
             [
                 run.id,
-                run.action,
-                _none_to_empty(run.entity_type),
+                label_audit_action(run.action),
+                label_audit_entity_type(run.entity_type),
                 _none_to_empty(run.entity_id),
-                run.status,
-                str(run.duration_ms),
+                label_audit_status(run.status),
+                format_duration_ru(run.duration_ms),
                 _none_to_empty(run.error),
-                run.created_at,
+                format_datetime_ru(run.created_at),
                 serialize_json_cell(details),
             ]
         )

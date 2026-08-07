@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.repositories.audit_repository import AuditRunRepository
 from app.services.audit_service import validate_audit_invariant
+from app.services.display_labels import format_datetime_ru, format_duration_ru, label_audit_action
 from tests.helpers import audit_run_snapshot, make_audit_run
 
 
@@ -281,13 +282,13 @@ def test_export_audit_runs_empty_has_bom_and_header_only(client):
     assert rows == [
         [
             "ID записи",
-            "Действие",
-            "Тип сущности",
-            "ID сущности",
+            "Операция",
+            "Тип объекта",
+            "ID объекта",
             "Статус",
-            "Длительность, мс",
+            "Длительность",
             "Ошибка",
-            "Дата создания",
+            "Дата и время",
             "Детали JSON",
         ]
     ]
@@ -316,13 +317,13 @@ def test_export_audit_runs_normal_row(client, db_session):
     assert len(rows) == 2
     data_row = rows[1]
     assert data_row[0] == audit_run.id
-    assert data_row[1] == "document.create"
-    assert data_row[2] == "document"
+    assert data_row[1] == label_audit_action("document.create")
+    assert data_row[2] == "Документ"
     assert data_row[3] == "doc-1"
-    assert data_row[4] == "success"
-    assert data_row[5] == "42"
+    assert data_row[4] == "Успешно"
+    assert data_row[5] == format_duration_ru(42)
     assert data_row[6] == ""
-    assert data_row[7] == audit_run.created_at
+    assert data_row[7] == format_datetime_ru(audit_run.created_at)
     details = json.loads(data_row[8])
     assert details == {"input_json": {"title": "t"}, "output_json": {"id": "doc-1"}}
 
@@ -344,7 +345,7 @@ def test_export_audit_runs_null_duration_and_error_become_empty_or_zero(client, 
     assert data_row[0] == audit_run.id
     assert data_row[2] == ""
     assert data_row[3] == ""
-    assert data_row[5] == "0"
+    assert data_row[5] == format_duration_ru(0)
     assert data_row[6] == ""
 
 
@@ -361,7 +362,7 @@ def test_export_audit_runs_error_row(client, db_session):
     rows = _parse_csv(response.content)
     data_row = rows[1]
     assert data_row[0] == audit_run.id
-    assert data_row[4] == "error"
+    assert data_row[4] == "Техническая ошибка"
     assert data_row[6] == "Сбой модели (сведения скрыты)"
 
 
@@ -402,7 +403,7 @@ def test_export_audit_runs_errors_only(client, db_session):
     rows = _parse_csv(response.content)
     assert len(rows) == 2
     assert rows[1][0] == error_run.id
-    assert rows[1][4] == "error"
+    assert rows[1][4] == "Техническая ошибка"
 
 
 def test_export_audit_runs_status_and_errors_only_combination_is_accepted(client, db_session):

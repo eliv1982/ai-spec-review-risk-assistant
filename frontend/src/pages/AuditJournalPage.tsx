@@ -7,7 +7,8 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { LoadingIndicator } from "../components/LoadingIndicator";
 import { Pagination } from "../components/Pagination";
 import { JsonBlock } from "../components/JsonBlock";
-import { auditStatusBadgeClass, labelAuditStatus, labelEntityType } from "../utils/labels";
+import { auditStatusBadgeClass, labelAuditAction, labelAuditStatus, labelEntityType } from "../utils/labels";
+import { formatDateTime, formatDuration } from "../utils/formatting";
 import { computeCorrectedOffset } from "../utils/pagination";
 
 const PAGE_SIZE = 20;
@@ -151,11 +152,10 @@ export function AuditJournalPage() {
 
   return (
     <main className="page">
-      <div className="container-wide">
+      <div className="container-wide container-audit">
         <h1>Журнал аудита</h1>
         <p className="lead">
-          Технический журнал операций: успешные проверки, случаи, требующие ручной проверки, и
-          технические ошибки.
+          История операций сервиса: создание документов, проверки и технические ошибки.
         </p>
 
         <div className="card filters-form">
@@ -169,7 +169,7 @@ export function AuditJournalPage() {
             >
               <option value="all">Все записи</option>
               <option value="success">Успешно</option>
-              <option value="needs_review">Требуется ручная проверка</option>
+              <option value="needs_review">Нужна экспертная проверка</option>
               <option value="error">Только ошибки</option>
             </select>
           </div>
@@ -236,9 +236,9 @@ export function AuditJournalPage() {
 
                   return (
                     <tr key={run.id}>
-                      <td>{run.created_at}</td>
+                      <td>{formatDateTime(run.created_at)}</td>
                       <td>
-                        <code>{run.action}</code>
+                        {labelAuditAction(run.action)}
                         {(promptVersion || schemaVersion) && (
                           <div className="row-note">
                             {promptVersion && (
@@ -265,17 +265,17 @@ export function AuditJournalPage() {
                           <>
                             {labelEntityType(run.entity_type)}
                             <br />
-                            <code>{run.entity_id ?? "—"}</code>
+                            <code className="id-cell">{run.entity_id ?? "—"}</code>
                           </>
                         ) : (
                           "—"
                         )}
                       </td>
-                      <td>{run.duration_ms} мс</td>
+                      <td>{formatDuration(run.duration_ms)}</td>
                       <td className="long-text">{run.error ?? "—"}</td>
                       <td>
-                        <JsonBlock title="input_json" value={run.input_json} />
-                        <JsonBlock title="output_json" value={run.output_json} />
+                        <JsonBlock title="Входные данные" value={run.input_json} />
+                        <JsonBlock title="Результат" value={run.output_json} />
                       </td>
                     </tr>
                   );

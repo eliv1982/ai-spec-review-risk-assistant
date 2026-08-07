@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { ReviewsDashboardPage } from "./ReviewsDashboardPage";
 import { getApiBaseUrl } from "../api/client";
+import { labelReasonCode } from "../utils/labels";
+import { formatDateTime } from "../utils/formatting";
 import type { FinalReview, ReviewResponse } from "../types/api";
 
 // Derived from the real base-URL logic (not hardcoded) so the expected
@@ -182,7 +184,7 @@ describe("ReviewsDashboardPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("загружает и отображает список проверок", async () => {
+  it("загружает и отображает список проверок под заголовком «История проверок»", async () => {
     vi.stubGlobal(
       "fetch",
       mockReviewsApi([
@@ -193,9 +195,48 @@ describe("ReviewsDashboardPage", () => {
 
     renderPage();
 
+    expect(screen.getByRole("heading", { name: "История проверок", level: 1 })).toBeInTheDocument();
+
     const table = await screen.findByRole("table");
     expect(within(table).getByText("review-1")).toBeInTheDocument();
     expect(within(table).getByText("review-2")).toBeInTheDocument();
+  });
+
+  it("подключает таблицу к локализованным значениям (дата, уверенность, готовность, причина) вместо сырых enum", async () => {
+    const review: ReviewResponse = {
+      id: "review-medium",
+      created_at: "2026-08-04T18:30:00Z",
+      document_id: "doc-1",
+      review_json: {
+        ...BASE_FINAL_REVIEW,
+        confidence: "medium",
+        document_readiness: "needs_clarification",
+        needs_review: true,
+        review_reason_codes: ["LOW_CONFIDENCE"],
+      },
+      confidence: "medium",
+      readiness: "needs_clarification",
+      needs_review: true,
+      reason_codes: ["LOW_CONFIDENCE"],
+      error: null,
+    };
+
+    vi.stubGlobal("fetch", mockReviewsApi([review]));
+
+    renderPage();
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText(formatDateTime("2026-08-04T18:30:00Z"))).toBeInTheDocument();
+    expect(within(table).getByText("Средняя")).toBeInTheDocument();
+    expect(within(table).getByText("Требует уточнений")).toBeInTheDocument();
+    expect(within(table).getByText(labelReasonCode("LOW_CONFIDENCE"))).toBeInTheDocument();
+    expect(within(table).getByText("Нужна экспертная проверка")).toBeInTheDocument();
+
+    // The business table cells must never leak the raw backend enum/code
+    // values — only their localized Russian labels.
+    expect(within(table).queryByText("medium")).not.toBeInTheDocument();
+    expect(within(table).queryByText("needs_clarification")).not.toBeInTheDocument();
+    expect(within(table).queryByText("LOW_CONFIDENCE")).not.toBeInTheDocument();
   });
 
   it("REGRESSION: начальная загрузка отправляет точный запрос GET http://127.0.0.1:8000/api/reviews?limit=20&offset=0", async () => {
@@ -211,7 +252,7 @@ describe("ReviewsDashboardPage", () => {
     expect(String(url)).toBe("http://127.0.0.1:8000/api/reviews?limit=20&offset=0");
   });
 
-  it("needs_review=true хорошо заметен («Требуется ручная проверка»)", async () => {
+  it("needs_review=true хорошо заметен («Нужна экспертная проверка»)", async () => {
     vi.stubGlobal(
       "fetch",
       mockReviewsApi([buildReview({ id: "review-1", needs_review: true, reason_codes: ["LOW_CONFIDENCE"] })]),
@@ -220,10 +261,10 @@ describe("ReviewsDashboardPage", () => {
     renderPage();
 
     const table = await screen.findByRole("table");
-    expect(within(table).getByText("Требуется ручная проверка")).toBeInTheDocument();
+    expect(within(table).getByText("Нужна экспертная проверка")).toBeInTheDocument();
   });
 
-  it("needs_review=false отображается нейтрально («Автоматическая проверка завершена»)", async () => {
+  it("needs_review=false отображается нейтрально («Экспертная проверка не требуется»)", async () => {
     vi.stubGlobal(
       "fetch",
       mockReviewsApi([buildReview({ id: "review-1", needs_review: false, reason_codes: [] })]),
@@ -232,11 +273,11 @@ describe("ReviewsDashboardPage", () => {
     renderPage();
 
     const table = await screen.findByRole("table");
-    expect(within(table).getByText("Автоматическая проверка завершена")).toBeInTheDocument();
-    expect(within(table).queryByText("Требуется ручная проверка")).not.toBeInTheDocument();
+    expect(within(table).getByText("Экспертная проверка не требуется")).toBeInTheDocument();
+    expect(within(table).queryByText("Нужна экспертная проверка")).not.toBeInTheDocument();
   });
 
-  it("переход «Открыть проверку» использует точный review id", async () => {
+  it("переход «Открыть результат» использует точный review id", async () => {
     vi.stubGlobal(
       "fetch",
       mockReviewsApi([buildReview({ id: "review-exact-id", needs_review: false, reason_codes: [] })]),
@@ -244,7 +285,7 @@ describe("ReviewsDashboardPage", () => {
 
     renderPage();
 
-    const link = await screen.findByRole("link", { name: "Открыть проверку" });
+    const link = await screen.findByRole("link", { name: "Открыть результат" });
     expect(link).toHaveAttribute("href", "/reviews/review-exact-id");
   });
 
@@ -260,7 +301,7 @@ describe("ReviewsDashboardPage", () => {
     await screen.findByRole("table");
 
     await user.type(screen.getByLabelText("Идентификатор документа"), "doc-b");
-    await user.click(screen.getByRole("button", { name: "Показать" }));
+    await user.click(screen.getByRole("button", { name: "Применить" }));
 
     const table = await screen.findByRole("table");
     expect(within(table).getByText("review-b")).toBeInTheDocument();
@@ -282,8 +323,8 @@ describe("ReviewsDashboardPage", () => {
     renderPage();
     await screen.findByRole("table");
 
-    await user.selectOptions(screen.getByLabelText("Статус проверки"), "true");
-    await user.click(screen.getByRole("button", { name: "Показать" }));
+    await user.selectOptions(screen.getByLabelText("Экспертная проверка"), "true");
+    await user.click(screen.getByRole("button", { name: "Применить" }));
 
     const table = await screen.findByRole("table");
     expect(within(table).getByText("review-true")).toBeInTheDocument();
@@ -305,8 +346,8 @@ describe("ReviewsDashboardPage", () => {
     renderPage();
     await screen.findByRole("table");
 
-    await user.selectOptions(screen.getByLabelText("Статус проверки"), "false");
-    await user.click(screen.getByRole("button", { name: "Показать" }));
+    await user.selectOptions(screen.getByLabelText("Экспертная проверка"), "false");
+    await user.click(screen.getByRole("button", { name: "Применить" }));
 
     const table = await screen.findByRole("table");
     expect(within(table).getByText("review-false")).toBeInTheDocument();
@@ -329,8 +370,8 @@ describe("ReviewsDashboardPage", () => {
     await screen.findByRole("table");
 
     await user.type(screen.getByLabelText("Идентификатор документа"), "doc-a");
-    await user.selectOptions(screen.getByLabelText("Статус проверки"), "true");
-    await user.click(screen.getByRole("button", { name: "Показать" }));
+    await user.selectOptions(screen.getByLabelText("Экспертная проверка"), "true");
+    await user.click(screen.getByRole("button", { name: "Применить" }));
     await user.click(screen.getByRole("button", { name: "Далее" }));
     await screen.findByText(/показаны 21–25 из 25/i);
 
@@ -349,7 +390,7 @@ describe("ReviewsDashboardPage", () => {
     expect(url.searchParams.has("needs_review")).toBe(false);
     expect(url.searchParams.get("offset")).toBe("0");
     expect((screen.getByLabelText("Идентификатор документа") as HTMLInputElement).value).toBe("");
-    expect((screen.getByLabelText("Статус проверки") as HTMLSelectElement).value).toBe("all");
+    expect((screen.getByLabelText("Экспертная проверка") as HTMLSelectElement).value).toBe("all");
   });
 
   it("stale late error: устаревший запрос завершается ошибкой после успешного нового — актуальные данные остаются, banner не появляется", async () => {
@@ -372,7 +413,7 @@ describe("ReviewsDashboardPage", () => {
     await screen.findByText(/загружаем список проверок/i);
 
     await user.type(screen.getByLabelText("Идентификатор документа"), "doc-b");
-    await user.click(screen.getByRole("button", { name: "Показать" }));
+    await user.click(screen.getByRole("button", { name: "Применить" }));
 
     deferred2.resolve(
       jsonResponse(
@@ -527,7 +568,7 @@ describe("ReviewsDashboardPage", () => {
     expect(new URL(String(lastCall[0])).searchParams.get("offset")).toBe("20");
 
     await user.type(screen.getByLabelText("Идентификатор документа"), "doc-1");
-    await user.click(screen.getByRole("button", { name: "Показать" }));
+    await user.click(screen.getByRole("button", { name: "Применить" }));
 
     await screen.findByText(/показаны 1–20 из 25/i);
     lastCall = fetchMock.mock.calls[fetchMock.mock.calls.length - 1];
@@ -602,7 +643,7 @@ describe("ReviewsDashboardPage", () => {
     await screen.findByText(/загружаем список проверок/i);
 
     await user.type(screen.getByLabelText("Идентификатор документа"), "doc-b");
-    await user.click(screen.getByRole("button", { name: "Показать" }));
+    await user.click(screen.getByRole("button", { name: "Применить" }));
 
     // The newer (filtered) request resolves first.
     deferred2.resolve(
@@ -677,8 +718,8 @@ describe("ReviewsDashboardPage — экспорт CSV", () => {
     await screen.findByRole("table");
 
     await user.type(screen.getByLabelText("Идентификатор документа"), "doc-a");
-    await user.selectOptions(screen.getByLabelText("Статус проверки"), "true");
-    await user.click(screen.getByRole("button", { name: "Показать" }));
+    await user.selectOptions(screen.getByLabelText("Экспертная проверка"), "true");
+    await user.click(screen.getByRole("button", { name: "Применить" }));
     await screen.findByRole("table");
 
     await user.click(screen.getByRole("button", { name: "Скачать CSV" }));

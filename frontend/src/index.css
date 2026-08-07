@@ -311,6 +311,7 @@ textarea:disabled {
   background-color: var(--color-bg);
   color: var(--color-text-muted);
   border: 1px solid var(--color-border);
+  white-space: nowrap;
 }
 
 .badge-neutral {
@@ -420,6 +421,13 @@ textarea:disabled {
   gap: var(--spacing-5);
 }
 
+/* The audit journal table has more columns (incl. version metadata and two
+   detail buttons per row) than the reviews dashboard sharing .container-wide
+   — give it extra desktop width so those columns aren't squeezed. */
+.container-wide.container-audit {
+  max-width: 1400px;
+}
+
 /* Filters */
 
 .filters-form {
@@ -484,6 +492,31 @@ select {
 
 .data-table tbody tr:last-child td {
   border-bottom: none;
+}
+
+/* A button/link inside a data-table cell must never wrap its label onto
+   multiple lines — with `word-break: break-word` inherited from the parent
+   `td` (needed for long unbroken UUID cells), an auto-sized narrow column
+   would otherwise force the label to wrap almost letter by letter. */
+.data-table .button {
+  white-space: nowrap;
+}
+
+/* The "Входные данные"/"Результат" detail toggles in the audit table are
+   <summary> elements, not .button — same nowrap treatment, plus a shared
+   minimum width so both toggles in a row read as an aligned pair rather than
+   two ad-hoc widths. */
+.data-table .json-block-details summary {
+  white-space: nowrap;
+  min-width: 130px;
+}
+
+/* UUIDs are technical detail, not the primary thing a reader scans a table
+   row for — de-emphasize them relative to the business columns (dates,
+   labels, statuses) instead of matching the default `code` styling weight. */
+.data-table .id-cell {
+  color: var(--color-text-muted);
+  font-size: 0.85em;
 }
 
 .row-note {

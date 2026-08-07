@@ -262,7 +262,7 @@ They must never occur on a successfully parsed and validated `ModelReviewDraft`.
   "missing_requirements": [],
   "contradictions": [],
   "questions_to_client": [
-    "Can you provide a more complete and specific specification for manual review?"
+    "Can you provide a more complete and specific requirements document?"
   ],
   "acceptance_criteria": [],
   "confidence": "low",
@@ -296,9 +296,10 @@ document-backed review:
 - `Review` is stored (not skipped);
 - `review_json` contains the valid safe fallback `FinalReview` shown above;
 - `Review.needs_review = true`;
-- `Review.error` is a non-empty, sanitized string (never `null`, never the raw
-  exception/message/traceback/provider payload — only the closed `LLMErrorCategory`
-  value);
+- `Review.error` is a non-empty, sanitized string (never `null`): a fixed,
+  business-facing message, never the raw exception/message/traceback/provider
+  payload, and never the `LLMErrorCategory` value either — that value is recorded
+  separately, only as technical metadata in `AuditRun.output_json.llm_error_category`;
 - `AuditRun.status = "error"`;
 - `AuditRun.error` is the same non-empty, sanitized string;
 - `Document.status = "review_failed"` — **not** `reviewed`: a persisted fallback is a
@@ -336,7 +337,7 @@ review_schema_version = "spec-review-schema-v1"
 The companion prompt version string is:
 
 ```text
-prompt_version = "spec-review-prompt-v1"
+prompt_version = "spec-review-prompt-v2"
 ```
 
 These are application constants stored inside audit `input_json` or `output_json`, not new database columns. A material schema change requires a new `review_schema_version` literal; previous literals must not be silently reused.
@@ -368,8 +369,8 @@ These are application constants stored inside audit `input_json` or `output_json
     "Should failed deliveries be retried, and with what policy?"
   ],
   "acceptance_criteria": [
-    "Given a subscribed user and a triggering event, when the event is processed, then the user receives exactly one notification within 60 seconds under normal operation.",
-    "Given a delivery failure, when retries are exhausted, then the failure is recorded and visible to an operator."
+    "Если пользователь подписан и наступает триггерное событие, когда событие обработано, то пользователь получает ровно одно уведомление в течение 60 секунд в штатном режиме работы.",
+    "Если доставка завершилась ошибкой, когда попытки повтора исчерпаны, то ошибка фиксируется и становится видна оператору."
   ],
   "confidence": "medium",
   "document_readiness": "needs_clarification",
@@ -404,8 +405,8 @@ Assuming the original input is not vague and no content-derived condition fires:
     "Should failed deliveries be retried, and with what policy?"
   ],
   "acceptance_criteria": [
-    "Given a subscribed user and a triggering event, when the event is processed, then the user receives exactly one notification within 60 seconds under normal operation.",
-    "Given a delivery failure, when retries are exhausted, then the failure is recorded and visible to an operator."
+    "Если пользователь подписан и наступает триггерное событие, когда событие обработано, то пользователь получает ровно одно уведомление в течение 60 секунд в штатном режиме работы.",
+    "Если доставка завершилась ошибкой, когда попытки повтора исчерпаны, то ошибка фиксируется и становится видна оператору."
   ],
   "confidence": "medium",
   "document_readiness": "needs_clarification",

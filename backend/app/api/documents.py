@@ -68,7 +68,9 @@ def get_document(document_id: UUID, db: Session = Depends(get_db)) -> DocumentRe
         "отличие от этого, — техническая ошибка модели/провайдера/парсера, безопасно "
         "локализованная бэкендом: API всё равно возвращает 201, потому что "
         "безопасный Review успешно сохранён, но needs_review=true, Review.error "
-        "заполнен непустым безопасным описанием категории сбоя, AuditRun.status=error "
+        "заполнен фиксированным безопасным пользовательским сообщением, не раскрывающим "
+        "конкретную техническую категорию сбоя — она доступна только отдельно, в "
+        "техническом AuditRun.output_json.llm_error_category, AuditRun.status=error "
         "и Document.status=review_failed."
     ),
 )

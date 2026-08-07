@@ -7,7 +7,8 @@ import type { PaginatedResponse, ReviewResponse } from "../types/api";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { LoadingIndicator } from "../components/LoadingIndicator";
 import { Pagination } from "../components/Pagination";
-import { labelConfidence, labelReadiness } from "../utils/labels";
+import { labelConfidence, labelNeedsReview, labelReadiness, labelReasonCode } from "../utils/labels";
+import { formatDateTime } from "../utils/formatting";
 import { computeCorrectedOffset } from "../utils/pagination";
 
 const PAGE_SIZE = 20;
@@ -141,8 +142,8 @@ export function ReviewsDashboardPage() {
   return (
     <main className="page">
       <div className="container-wide">
-        <h1>Проверки</h1>
-        <p className="lead">Витрина сохранённых проверок документов с фильтрами и постраничной навигацией.</p>
+        <h1>История проверок</h1>
+        <p className="lead">Сохранённые результаты проверок документов.</p>
 
         <form className="card filters-form" onSubmit={handleSubmit}>
           <div className="filters-field">
@@ -158,7 +159,7 @@ export function ReviewsDashboardPage() {
           </div>
 
           <div className="filters-field">
-            <label htmlFor="needs-review-filter">Статус проверки</label>
+            <label htmlFor="needs-review-filter">Экспертная проверка</label>
             <select
               id="needs-review-filter"
               name="needs-review-filter"
@@ -166,14 +167,14 @@ export function ReviewsDashboardPage() {
               onChange={(event) => setNeedsReviewInput(event.target.value as NeedsReviewFilter)}
             >
               <option value="all">Все</option>
-              <option value="true">Требуется ручная проверка</option>
-              <option value="false">Автоматическая проверка завершена</option>
+              <option value="true">{labelNeedsReview(true)}</option>
+              <option value="false">{labelNeedsReview(false)}</option>
             </select>
           </div>
 
           <div className="form-actions">
             <button type="submit" className="button button-primary">
-              Показать
+              Применить
             </button>
             <button type="button" className="button button-secondary" onClick={handleResetFilters}>
               Сбросить фильтры
@@ -219,11 +220,11 @@ export function ReviewsDashboardPage() {
               <thead>
                 <tr>
                   <th scope="col">Дата и время</th>
-                  <th scope="col">Проверка</th>
-                  <th scope="col">Документ</th>
+                  <th scope="col">ID проверки</th>
+                  <th scope="col">ID документа</th>
                   <th scope="col">Уверенность</th>
-                  <th scope="col">Готовность</th>
-                  <th scope="col">Статус</th>
+                  <th scope="col">Статус готовности</th>
+                  <th scope="col">Экспертная проверка</th>
                   <th scope="col">Причины</th>
                   <th scope="col">Действие</th>
                 </tr>
@@ -231,20 +232,20 @@ export function ReviewsDashboardPage() {
               <tbody>
                 {state.data.items.map((review) => (
                   <tr key={review.id}>
-                    <td>{review.created_at}</td>
+                    <td>{formatDateTime(review.created_at)}</td>
                     <td>
-                      <code>{review.id}</code>
+                      <code className="id-cell">{review.id}</code>
                     </td>
                     <td>
-                      <code>{review.document_id}</code>
+                      <code className="id-cell">{review.document_id}</code>
                     </td>
                     <td>{labelConfidence(review.confidence)}</td>
                     <td>{labelReadiness(review.readiness)}</td>
                     <td>
                       {review.needs_review ? (
-                        <span className="badge badge-warning">Требуется ручная проверка</span>
+                        <span className="badge badge-warning">{labelNeedsReview(true)}</span>
                       ) : (
-                        <span className="badge badge-neutral">Автоматическая проверка завершена</span>
+                        <span className="badge badge-neutral">{labelNeedsReview(false)}</span>
                       )}
                       {review.error && <div className="row-note">Есть техническое примечание</div>}
                     </td>
@@ -255,7 +256,7 @@ export function ReviewsDashboardPage() {
                         <ul className="badge-list">
                           {review.reason_codes.map((code) => (
                             <li key={code}>
-                              <code className="badge badge-neutral">{code}</code>
+                              <span className="badge badge-neutral">{labelReasonCode(code)}</span>
                             </li>
                           ))}
                         </ul>
@@ -263,7 +264,7 @@ export function ReviewsDashboardPage() {
                     </td>
                     <td>
                       <Link to={`/reviews/${review.id}`} className="button button-secondary">
-                        Открыть проверку
+                        Открыть результат
                       </Link>
                     </td>
                   </tr>

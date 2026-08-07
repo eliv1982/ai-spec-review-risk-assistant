@@ -5,6 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { ReviewResultRoute } from "./ReviewResultPage";
 import { explainReasonCode } from "../utils/reasonCodes";
+import { labelReasonCode } from "../utils/labels";
+import { formatDateTime } from "../utils/formatting";
 import type { DocumentResponse, FinalReview, ReviewResponse } from "../types/api";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -115,7 +117,7 @@ describe("ReviewResultPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("отображает блок «Требуется ручная проверка» и коды причин при needs_review=true", async () => {
+  it("отображает блок «Нужна экспертная проверка» и коды причин при needs_review=true", async () => {
     vi.stubGlobal(
       "fetch",
       routedFetch([
@@ -132,11 +134,13 @@ describe("ReviewResultPage", () => {
 
     renderReviewPage();
 
-    expect(await screen.findByText("Требуется ручная проверка")).toBeInTheDocument();
-    expect(screen.getByText("LOW_CONFIDENCE")).toBeInTheDocument();
-    expect(screen.getByText("MISSING_ACCEPTANCE_CRITERIA")).toBeInTheDocument();
+    expect(await screen.findByText("Нужна экспертная проверка")).toBeInTheDocument();
+    expect(screen.getByText(labelReasonCode("LOW_CONFIDENCE"))).toBeInTheDocument();
+    expect(screen.getByText(labelReasonCode("MISSING_ACCEPTANCE_CRITERIA"))).toBeInTheDocument();
     expect(screen.getByText(explainReasonCode("LOW_CONFIDENCE")!)).toBeInTheDocument();
     expect(screen.getByText(explainReasonCode("MISSING_ACCEPTANCE_CRITERIA")!)).toBeInTheDocument();
+    expect(screen.queryByText("LOW_CONFIDENCE")).not.toBeInTheDocument();
+    expect(screen.queryByText("MISSING_ACCEPTANCE_CRITERIA")).not.toBeInTheDocument();
   });
 
   it("корректно отображает спокойный статус при needs_review=false", async () => {
@@ -150,8 +154,95 @@ describe("ReviewResultPage", () => {
 
     renderReviewPage();
 
-    expect(await screen.findByText("Ручная проверка не требуется")).toBeInTheDocument();
-    expect(screen.queryByText("Требуется ручная проверка")).not.toBeInTheDocument();
+    expect(await screen.findByText("Экспертная проверка не требуется")).toBeInTheDocument();
+    expect(screen.queryByText("Нужна экспертная проверка")).not.toBeInTheDocument();
+  });
+
+  it("подключает бизнес-labels к данным ревью: Дата проверки, Статус готовности, Уверенность анализа, Краткое заключение, статус документа", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        ["/reviews/review-1", () => jsonResponse(buildReview({ needs_review: false, reason_codes: [] }))],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
+    );
+
+    renderReviewPage();
+
+    expect(await screen.findByText("Краткое заключение")).toBeInTheDocument();
+    expect(screen.getByText("Резюме проверки для теста.")).toBeInTheDocument();
+
+    expect(screen.getByText("Дата проверки")).toBeInTheDocument();
+    expect(screen.getByText(formatDateTime("2026-08-04T18:30:00Z"))).toBeInTheDocument();
+
+    // buildReview() fixes confidence="low"/readiness="not_ready" — proves the
+    // page renders the localized label, not the raw enum value.
+    expect(screen.getByText("Статус готовности")).toBeInTheDocument();
+    expect(screen.getByText("Не готов")).toBeInTheDocument();
+    expect(screen.queryByText("not_ready")).not.toBeInTheDocument();
+
+    expect(screen.getByText("Уверенность анализа")).toBeInTheDocument();
+    expect(screen.getByText("Низкая")).toBeInTheDocument();
+    expect(screen.queryByText("low")).not.toBeInTheDocument();
+
+    // Document workflow status is a distinct field from review readiness —
+    // buildDocument() defaults to status "reviewed", which must render as
+    // the business-facing "Проверка завершена", never the raw enum value.
+    expect(await screen.findByText("Проверка завершена")).toBeInTheDocument();
+    expect(screen.getByText("Статус документа")).toBeInTheDocument();
+    expect(screen.queryByText("reviewed")).not.toBeInTheDocument();
+  });
+
+  it("не переиспользует одно и то же грамматическое согласование для уровня риска и уверенности анализа", async () => {
+    const review: ReviewResponse = {
+      id: "review-1",
+      created_at: "2026-08-04T18:30:00Z",
+      document_id: "doc-1",
+      review_json: {
+        ...BASE_FINAL_REVIEW,
+        confidence: "high",
+        risks: [
+          {
+            severity: "high",
+            category: "security",
+            description: "Описание риска для теста.",
+            evidence: null,
+          },
+        ],
+        needs_review: false,
+        review_reason_codes: [],
+      },
+      confidence: "high",
+      readiness: "not_ready",
+      needs_review: false,
+      reason_codes: [],
+      error: null,
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      routedFetch([
+        ["/reviews/review-1", () => jsonResponse(review)],
+        ["/documents/doc-1", () => jsonResponse(buildDocument())],
+      ]),
+    );
+
+    renderReviewPage();
+
+    // Risk severity uses masculine adjective agreement ("Уровень риска: Высокий").
+    expect(await screen.findByText(/Уровень риска:\s*Высокий/)).toBeInTheDocument();
+
+    // Review confidence uses feminine adjective agreement ("Высокая") — a
+    // distinct top-level meta field from risk severity, not the same value
+    // rendered twice through one shared mapping helper.
+    expect(screen.getByText("Уверенность анализа")).toBeInTheDocument();
+    expect(screen.getByText("Высокая")).toBeInTheDocument();
+
+    // Catches accidental reuse of one grammatical mapping for both fields:
+    // severity must never render the feminine form, confidence must never
+    // render the bare masculine form.
+    expect(screen.queryByText(/Уровень риска:\s*Высокая/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Высокий")).not.toBeInTheDocument();
   });
 
   it("показывает русскоязычную ошибку API при сбое загрузки проверки", async () => {
@@ -187,15 +278,12 @@ describe("ReviewResultPage", () => {
     renderReviewPage();
 
     expect(await screen.findByText("Резюме проверки для теста.")).toBeInTheDocument();
-    expect(screen.getByText("В результате проверки риски не указаны.")).toBeInTheDocument();
-    expect(
-      screen.getByText("В результате проверки недостающие требования не указаны."),
-    ).toBeInTheDocument();
-    expect(screen.getByText("В результате проверки противоречия не указаны.")).toBeInTheDocument();
-    expect(screen.getByText("В результате проверки уточняющие вопросы не указаны.")).toBeInTheDocument();
-    expect(screen.getByText("В результате проверки критерии приёмки не указаны.")).toBeInTheDocument();
+    expect(screen.getByText("Риски не выявлены.")).toBeInTheDocument();
+    expect(screen.getByText("Недостающие требования не выявлены.")).toBeInTheDocument();
+    expect(screen.getByText("Противоречия не выявлены.")).toBeInTheDocument();
+    expect(screen.getByText("Уточняющие вопросы не сформированы.")).toBeInTheDocument();
+    expect(screen.getByText("Критерии приёмки не сформированы.")).toBeInTheDocument();
     expect(screen.queryByText(/не обнаружены/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/не сформированы/i)).not.toBeInTheDocument();
   });
 
   it("безопасно отображает неизвестный reason code без падения интерфейса", async () => {
@@ -227,9 +315,10 @@ describe("ReviewResultPage", () => {
 
     renderReviewPage();
 
-    expect(await screen.findByText("Требуется ручная проверка")).toBeInTheDocument();
-    expect(screen.getByText("MODEL_ERROR")).toBeInTheDocument();
-    expect(screen.getByText("В результате проверки риски не указаны.")).toBeInTheDocument();
+    expect(await screen.findByText("Нужна экспертная проверка")).toBeInTheDocument();
+    expect(screen.getByText(labelReasonCode("MODEL_ERROR"))).toBeInTheDocument();
+    expect(screen.queryByText("MODEL_ERROR")).not.toBeInTheDocument();
+    expect(screen.getByText("Риски не выявлены.")).toBeInTheDocument();
     expect(screen.queryByText(/не обнаружены/i)).not.toBeInTheDocument();
   });
 
@@ -336,8 +425,8 @@ describe("ReviewResultPage", () => {
 
     expect(screen.getByText("review-2")).toBeInTheDocument();
     expect(screen.queryByText("review-1")).not.toBeInTheDocument();
-    expect(screen.getByText("Ручная проверка не требуется")).toBeInTheDocument();
-    expect(screen.queryByText("Требуется ручная проверка")).not.toBeInTheDocument();
+    expect(screen.getByText("Экспертная проверка не требуется")).toBeInTheDocument();
+    expect(screen.queryByText("Нужна экспертная проверка")).not.toBeInTheDocument();
   });
 
   it("не показывает error banner для устаревшего запроса, который поздно завершается ошибкой", async () => {
@@ -379,7 +468,7 @@ describe("ReviewResultPage", () => {
     await flushMicrotasks();
 
     expect(screen.getByText("review-2")).toBeInTheDocument();
-    expect(screen.getByText("Ручная проверка не требуется")).toBeInTheDocument();
+    expect(screen.getByText("Экспертная проверка не требуется")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText(/не удалось загрузить проверку/i)).not.toBeInTheDocument();
   });
@@ -618,7 +707,7 @@ describe("ReviewResultPage", () => {
       </StrictMode>,
     );
 
-    expect(await screen.findByText("Ручная проверка не требуется")).toBeInTheDocument();
+    expect(await screen.findByText("Экспертная проверка не требуется")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -658,7 +747,8 @@ describe("ReviewResultPage", () => {
 
     const { container } = renderReviewPage();
 
-    expect(await screen.findByText("review_json (JSON)")).toBeInTheDocument();
+    expect(await screen.findByText("Служебные данные")).toBeInTheDocument();
+    expect(await screen.findByText("JSON результата")).toBeInTheDocument();
     const details = container.querySelector(".json-block-details");
     expect(details).not.toBeNull();
     expect(details?.hasAttribute("open")).toBe(false);
@@ -666,6 +756,10 @@ describe("ReviewResultPage", () => {
     expect(pre?.textContent).toContain('"summary"');
     expect(pre?.textContent).toContain("Резюме проверки для теста.");
     expect(pre?.textContent).toContain('"review_reason_codes"');
+    // The raw technical code stays intact inside the JSON block, even though
+    // the human-readable reason list above it shows the translated label
+    // instead (see the "коды причин" test above).
+    expect(pre?.textContent).toContain('"LOW_CONFIDENCE"');
   });
 
   it("ошибка загрузки документа не скрывает уже загруженный review", async () => {
@@ -679,7 +773,7 @@ describe("ReviewResultPage", () => {
 
     renderReviewPage();
 
-    expect(await screen.findByText("Ручная проверка не требуется")).toBeInTheDocument();
+    expect(await screen.findByText("Экспертная проверка не требуется")).toBeInTheDocument();
     expect(screen.getByText("Резюме проверки для теста.")).toBeInTheDocument();
     expect(screen.getByText("Внутренняя ошибка сервера")).toBeInTheDocument();
     expect(screen.getByText("Не удалось загрузить исходный документ")).toBeInTheDocument();
@@ -733,7 +827,7 @@ describe("ReviewResultPage", () => {
     expect(await screen.findByText("Документ номер два")).toBeInTheDocument();
   });
 
-  it("ссылка «К списку проверок» ведёт на /reviews", async () => {
+  it("ссылки «К истории проверок» и «Проверить другой документ» ведут на точные маршруты", async () => {
     vi.stubGlobal(
       "fetch",
       routedFetch([
@@ -744,8 +838,11 @@ describe("ReviewResultPage", () => {
 
     renderReviewPage();
 
-    const link = await screen.findByRole("link", { name: "К списку проверок" });
-    expect(link).toHaveAttribute("href", "/reviews");
+    const historyLink = await screen.findByRole("link", { name: "К истории проверок" });
+    expect(historyLink).toHaveAttribute("href", "/reviews");
+
+    const newDocumentLink = screen.getByRole("link", { name: "Проверить другой документ" });
+    expect(newDocumentLink).toHaveAttribute("href", "/");
   });
 });
 

@@ -204,7 +204,7 @@ def test_happy_path_persists_review_and_audit(db_session):
     assert stored_audit.status == "success"
     assert stored_audit.error is None
     assert stored_audit.duration_ms >= 0
-    assert stored_audit.input_json["prompt_version"] == "spec-review-prompt-v1"
+    assert stored_audit.input_json["prompt_version"] == "spec-review-prompt-v2"
     assert stored_audit.input_json["review_schema_version"] == "spec-review-schema-v1"
     assert stored_audit.output_json["used_fallback"] is False
     assert stored_audit.output_json["llm_error_category"] is None
@@ -314,7 +314,10 @@ def test_fallback_path_persists_as_error_not_needs_review(db_session, category, 
     assert result.llm_error_category == category
     assert result.final_review.needs_review is True
     assert result.review_error
-    assert category.value in result.review_error
+    # The business-facing error is a fixed message and never names the raw
+    # LLM error category — the category still lives on, separately, as
+    # technical audit metadata (`output_json`, checked below).
+    assert category.value not in result.review_error
 
     stored_review = db_session.get(Review, str(result.review_id))
     assert stored_review.needs_review == 1
@@ -326,13 +329,13 @@ def test_fallback_path_persists_as_error_not_needs_review(db_session, category, 
     assert bool(stored_review.needs_review) is True
     assert stored_review.error
     assert stored_review.error.strip() == stored_review.error
-    assert category.value in stored_review.error
+    assert category.value not in stored_review.error
 
     stored_audit = db_session.get(AuditRun, str(result.audit_run_id))
     assert stored_audit.status == "error"
     assert stored_audit.error
     assert stored_audit.error.strip() == stored_audit.error
-    assert category.value in stored_audit.error
+    assert category.value not in stored_audit.error
     assert stored_audit.output_json["used_fallback"] is True
     assert stored_audit.output_json["llm_error_category"] == category.value
     # The category is metadata on the audit row, never folded into the review's own
@@ -724,7 +727,7 @@ def test_prompt_and_schema_version_use_imported_constants(db_session):
     result = workflow.run(UUID(document.id))
 
     stored_audit = db_session.get(AuditRun, str(result.audit_run_id))
-    assert PROMPT_VERSION == "spec-review-prompt-v1"
+    assert PROMPT_VERSION == "spec-review-prompt-v2"
     assert REVIEW_SCHEMA_VERSION == "spec-review-schema-v1"
     assert stored_audit.input_json["prompt_version"] == PROMPT_VERSION
     assert stored_audit.input_json["review_schema_version"] == REVIEW_SCHEMA_VERSION
@@ -804,7 +807,7 @@ def test_result_accepts_fallback_with_error_audit_status_and_review_error():
         audit_status=AuditStatus.error,
         used_fallback=True,
         llm_error_category=LLMErrorCategory.PROVIDER_ERROR,
-        review_error="Проверка документа вернула безопасный резервный результат (категория ошибки LLM: PROVIDER_ERROR).",
+        review_error="Проверку не удалось выполнить автоматически. Результат требует экспертной проверки.",
     )
     assert result.audit_status == AuditStatus.error
     assert result.used_fallback is True

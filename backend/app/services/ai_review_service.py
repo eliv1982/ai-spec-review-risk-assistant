@@ -28,9 +28,10 @@ with a non-empty sanitized summary, not `status="needs_review"`:
     final_review.needs_review is True,  used_fallback is False -> needs_review, error=None
     used_fallback is True                                      -> error,     non-empty sanitized error
 
-The sanitized error message only ever names the safe, closed `LLMErrorCategory`
-value — never the original exception, its message, a traceback, or a provider
-payload.
+The sanitized error message is a fixed business-facing string — never the
+`LLMErrorCategory` value, the original exception, its message, a traceback, or a
+provider payload. The category itself is still recorded, separately, as technical
+audit metadata (`output_json.llm_error_category`).
 
 Recovery boundary (mirrors `ReviewWorkflow`'s own error-audit pattern): the
 orchestrator call, audit-snapshot construction, and the ordinary `ai.review` audit
@@ -62,8 +63,8 @@ from app.services.review_workflow import ReviewOrchestratorProtocol
 
 _AUDIT_ACTION = "ai.review"
 
-_FALLBACK_AUDIT_ERROR_MESSAGE_TEMPLATE = (
-    "Проверка ИИ вернула безопасный резервный результат (категория ошибки LLM: {category})."
+_FALLBACK_AUDIT_ERROR_MESSAGE = (
+    "Проверку не удалось выполнить автоматически. Результат требует экспертной проверки."
 )
 
 _UNEXPECTED_ERROR_AUDIT_MESSAGE = (
@@ -102,9 +103,7 @@ class AIReviewService:
 
             if result.used_fallback:
                 status = AuditStatus.error
-                error = _FALLBACK_AUDIT_ERROR_MESSAGE_TEMPLATE.format(
-                    category=result.llm_error_category.value
-                )
+                error = _FALLBACK_AUDIT_ERROR_MESSAGE
             elif result.final_review.needs_review:
                 status = AuditStatus.needs_review
                 error = None

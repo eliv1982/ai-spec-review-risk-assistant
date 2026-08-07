@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.repositories.review_repository import ReviewRepository
+from app.services.display_labels import format_datetime_ru, label_reason_code
 from tests.helpers import audit_run_snapshot, make_audit_run, make_document, make_review
 
 
@@ -195,11 +196,11 @@ def test_export_reviews_empty_has_bom_and_header_only(client):
             "ID проверки",
             "ID документа",
             "Название документа",
-            "Дата создания",
-            "Требуется ручная проверка",
-            "Уверенность",
-            "Готовность документа",
-            "Коды причин",
+            "Дата проверки",
+            "Нужна экспертная проверка",
+            "Уверенность анализа",
+            "Статус готовности",
+            "Причины экспертной проверки",
             "Ошибка",
         ]
     ]
@@ -229,10 +230,10 @@ def test_export_reviews_normal_row_and_russian_text(client, db_session):
     assert data_row[0] == review.id
     assert data_row[1] == document.id
     assert data_row[2] == "Договор на разработку ПО"
-    assert data_row[3] == review.created_at
-    assert data_row[4] == "false"
-    assert data_row[5] == "high"
-    assert data_row[6] == "ready"
+    assert data_row[3] == format_datetime_ru(review.created_at)
+    assert data_row[4] == "Нет"
+    assert data_row[5] == "Высокая"
+    assert data_row[6] == "Готов"
     assert data_row[7] == ""
     assert data_row[8] == ""
 
@@ -250,8 +251,10 @@ def test_export_reviews_needs_review_true_and_reason_codes(client, db_session):
     rows = _parse_csv(response.content)
     data_row = rows[1]
     assert data_row[0] == review.id
-    assert data_row[4] == "true"
-    assert data_row[7] == "LOW_CONFIDENCE|MISSING_ACCEPTANCE_CRITERIA"
+    assert data_row[4] == "Да"
+    assert data_row[7] == (
+        f"{label_reason_code('LOW_CONFIDENCE')}|{label_reason_code('MISSING_ACCEPTANCE_CRITERIA')}"
+    )
 
 
 def test_export_reviews_error_field(client, db_session):
@@ -470,11 +473,11 @@ def test_export_review_success(client, db_session):
     assert fields["ID проверки"] == review.id
     assert fields["ID документа"] == document.id
     assert fields["Название документа"] == "Спецификация API"
-    assert fields["Дата создания"] == review.created_at
-    assert fields["Требуется ручная проверка"] == "true"
-    assert fields["Уверенность"] == "low"
-    assert fields["Готовность документа"] == "not_ready"
-    assert fields["Коды причин"] == "LOW_CONFIDENCE"
+    assert fields["Дата проверки"] == format_datetime_ru(review.created_at)
+    assert fields["Нужна экспертная проверка"] == "Да"
+    assert fields["Уверенность анализа"] == "Низкая"
+    assert fields["Статус готовности"] == "Не готов"
+    assert fields["Причины экспертной проверки"] == label_reason_code("LOW_CONFIDENCE")
     assert fields["Ошибка"] == ""
     assert json.loads(fields["Полный результат JSON"]) == review.review_json
 

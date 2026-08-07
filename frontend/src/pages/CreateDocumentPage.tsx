@@ -103,10 +103,10 @@ export function CreateDocumentPage() {
   return (
     <main className="page">
       <div className="container">
-        <h1>Проверка спецификации ИИ-ассистентом</h1>
+        <h1>ИИ-рецензент требований и технических заданий</h1>
         <p className="lead">
-          Создайте документ с текстом требований или спецификации, и ассистент автоматически
-          запустит его проверку на риски, пробелы и противоречия.
+          Добавьте техническое задание, проектные или бизнес-требования. Ассистент выявит
+          пробелы, противоречия и риски, а также сформирует уточняющие вопросы.
         </p>
 
         <form className="card form" onSubmit={handleSubmit} noValidate>
@@ -123,7 +123,7 @@ export function CreateDocumentPage() {
               required
               aria-required="true"
               disabled={documentLocked || busy}
-              placeholder="Например: Спецификация модуля уведомлений"
+              placeholder="Например: Требования к модулю уведомлений"
             />
           </div>
 
@@ -140,7 +140,7 @@ export function CreateDocumentPage() {
               aria-required="true"
               disabled={documentLocked || busy}
               rows={12}
-              placeholder="Вставьте текст требований, спецификации или бизнес-задачи…"
+              placeholder="Вставьте техническое задание, требования, описание функции или задачи на автоматизацию…"
             />
           </div>
 
@@ -165,12 +165,12 @@ export function CreateDocumentPage() {
                 ? "Повторить запуск проверки"
                 : busy
                   ? "Выполняется…"
-                  : "Создать документ и запустить проверку"}
+                  : "Сохранить документ и запустить проверку"}
             </button>
 
             {documentLocked && (
               <button type="button" className="button button-secondary" onClick={handleReset} disabled={busy}>
-                Создать новый документ
+                Проверить другой документ
               </button>
             )}
           </div>

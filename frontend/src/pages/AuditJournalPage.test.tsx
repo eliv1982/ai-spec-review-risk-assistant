@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { AuditJournalPage } from "./AuditJournalPage";
 import { getApiBaseUrl } from "../api/client";
+import { labelAuditAction } from "../utils/labels";
+import { formatDateTime } from "../utils/formatting";
 import type { AuditRunResponse, AuditStatus } from "../types/api";
 
 // Derived from the real base-URL logic (not hardcoded) so the expected
@@ -189,8 +191,22 @@ describe("AuditJournalPage", () => {
     renderPage();
 
     const table = await screen.findByRole("table");
-    expect(within(table).getByText("document.review")).toBeInTheDocument();
-    expect(within(table).getByText("document.create")).toBeInTheDocument();
+    expect(within(table).getByText(labelAuditAction("document.review"))).toBeInTheDocument();
+    expect(within(table).getByText(labelAuditAction("document.create"))).toBeInTheDocument();
+    expect(within(table).queryByText("document.review")).not.toBeInTheDocument();
+    expect(within(table).queryByText("document.create")).not.toBeInTheDocument();
+  });
+
+  it("desktop-layout: страница использует расширенный контейнер container-audit для таблицы", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockAuditApi([buildAuditRun({ id: "audit-1", status: "success" })]),
+    );
+
+    const { container } = renderPage();
+    await screen.findByRole("table");
+
+    expect(container.querySelector(".container-audit")).not.toBeNull();
   });
 
   it("REGRESSION: начальная загрузка отправляет точный запрос GET http://127.0.0.1:8000/api/audit-runs?limit=20&offset=0", async () => {
@@ -219,6 +235,37 @@ describe("AuditJournalPage", () => {
     expect(within(table).getByText("Сбой модели")).toBeInTheDocument();
   });
 
+  it("подключает таблицу к локализованным значениям: дата, статус «Успешно», тип объекта, длительность в секундах при >=1000 мс", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockAuditApi([
+        buildAuditRun({
+          id: "audit-success",
+          action: "document.create",
+          status: "success",
+          entity_type: "document",
+          entity_id: "doc-1",
+          duration_ms: 36950,
+        }),
+      ]),
+    );
+
+    renderPage();
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText(formatDateTime("2026-08-04T18:30:00Z"))).toBeInTheDocument();
+    expect(within(table).getByText("Успешно")).toBeInTheDocument();
+    expect(within(table).getByText("Документ")).toBeInTheDocument();
+
+    // 36950 ms >= 1000 ms threshold -> one-decimal seconds, comma separator.
+    expect(within(table).getByText("37,0 с")).toBeInTheDocument();
+
+    // The business table must never leak raw backend values for these cells.
+    expect(within(table).queryByText("36950")).not.toBeInTheDocument();
+    expect(within(table).queryByText("success")).not.toBeInTheDocument();
+    expect(within(table).queryByText("document")).not.toBeInTheDocument();
+  });
+
   it("needs_review отображается отдельно от error, не как техническая ошибка", async () => {
     vi.stubGlobal(
       "fetch",
@@ -237,11 +284,11 @@ describe("AuditJournalPage", () => {
     expect(nrRow).toBeDefined();
     expect(errRow).toBeDefined();
 
-    expect(within(nrRow!).getByText("Требуется ручная проверка")).toBeInTheDocument();
+    expect(within(nrRow!).getByText("Нужна экспертная проверка")).toBeInTheDocument();
     expect(within(nrRow!).queryByText("Техническая ошибка")).not.toBeInTheDocument();
 
     expect(within(errRow!).getByText("Техническая ошибка")).toBeInTheDocument();
-    expect(within(errRow!).queryByText("Требуется ручная проверка")).not.toBeInTheDocument();
+    expect(within(errRow!).queryByText("Нужна экспертная проверка")).not.toBeInTheDocument();
   });
 
   it("«Только ошибки» формирует запрос с errors_only=true", async () => {
@@ -426,8 +473,8 @@ describe("AuditJournalPage", () => {
     await screen.findByRole("table");
 
     // Both JSON blocks are present (input_json populated, output_json null).
-    expect(screen.getByText("input_json")).toBeInTheDocument();
-    expect(screen.getByText("output_json")).toBeInTheDocument();
+    expect(screen.getByText("Входные данные")).toBeInTheDocument();
+    expect(screen.getByText("Результат")).toBeInTheDocument();
 
     // No real <script> element was ever created from the JSON content.
     expect(container.querySelector("script")).toBeNull();

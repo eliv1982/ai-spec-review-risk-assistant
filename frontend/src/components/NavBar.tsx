@@ -1,8 +1,8 @@
 import { NavLink } from "react-router-dom";
 
 const NAV_LINKS: Array<{ to: string; label: string; end?: boolean }> = [
-  { to: "/", label: "Новая проверка", end: true },
-  { to: "/reviews", label: "Проверки" },
+  { to: "/", label: "Проверить документ", end: true },
+  { to: "/reviews", label: "История проверок" },
   { to: "/audit", label: "Журнал аудита" },
 ];
 

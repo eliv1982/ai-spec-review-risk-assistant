@@ -44,7 +44,7 @@ The three CSV `/export` endpoints (see "CSV export conventions" below) are a del
 - SQLite column name: `reason_codes_json` (JSON text array). See [DATA_MODEL.md](DATA_MODEL.md).
 - API response field name in all JSON review payloads (create/list/detail and standalone AI): `reason_codes` — a native JSON array.
 - The API serializes `reason_codes_json` as `reason_codes`. Clients never see the column name `reason_codes_json`.
-- The CSV export endpoints (below) are not JSON and use their own column named "Коды причин" — see "CSV export conventions".
+- The CSV export endpoints (below) are not JSON and use their own localized column named "Причины экспертной проверки" (Russian reason-code labels, not the raw `reason_codes` values) — see "CSV export conventions".
 
 ### CSV export conventions (all `/export` endpoints)
 
@@ -262,7 +262,7 @@ Top-level denormalized response fields:
 ### Persistence and status outcomes
 
 - **Parsed `ModelReviewDraft` result (no technical failure):** commit review row, set document `status=reviewed`, and write audit atomically. Return `201` with the review payload. Review `error=null`. A result requiring human attention (deterministic codes and/or `model_needs_review=true`) uses audit `status="needs_review"` and audit `error=null`; a result that needs no human attention uses audit `status="success"` and audit `error=null`. Either way `document.status="reviewed"` — `needs_review` reflects the *content* of a completed review, it is never a technical failure signal on its own.
-- **Persisted safe `FinalReview` fallback (technical failure, safely contained):** commit review row, set document `status="review_failed"`, and write audit atomically. Return `201` with the review payload — never a `5xx`/`502` for this case. Review `needs_review=true` and review `error` is a non-empty sanitized summary naming only the closed LLM error category; audit `status="error"` with the same non-empty sanitized `error`.
+- **Persisted safe `FinalReview` fallback (technical failure, safely contained):** commit review row, set document `status="review_failed"`, and write audit atomically. Return `201` with the review payload — never a `5xx`/`502` for this case. Review `needs_review=true` and review `error` is a non-empty sanitized, fixed business-facing message — it never names the closed `LLMErrorCategory` value, which is instead recorded separately as technical metadata in `AuditRun.output_json.llm_error_category`; audit `status="error"` with the same non-empty sanitized `error`.
 - **No usable review can be stored (unexpected failure, no review row at all):** roll back the failed main review transaction (no partial `Review` row survives); attempt a separate, **best-effort** recovery transaction that sets `document.status="review_failed"` and writes the error audit row with `entity_type="document"`, `entity_id=<document id>`, `status="error"`, and a non-empty sanitized `error`. Return HTTP `500` (or the concrete failure status if the document was not found — `404`) either way, carrying the original workflow failure — never the recovery transaction's own failure, if it has one.
 
   - **Recovery transaction succeeds:** `document.status="review_failed"` and exactly one error `AuditRun` (as above) are durably committed.
@@ -288,7 +288,7 @@ Preferred MVP behaviour for model/JSON/schema failure is always to persist the s
 
 ### Audit for this endpoint
 
-Every `document.review` audit snapshot records `prompt_version="spec-review-prompt-v1"`, `review_schema_version="spec-review-schema-v1"`, and the configured model name inside `input_json` or `output_json`.
+Every `document.review` audit snapshot records `prompt_version="spec-review-prompt-v2"`, `review_schema_version="spec-review-schema-v1"`, and the configured model name inside `input_json` or `output_json`.
 
 | Outcome | Audit `status` | Audit `error` | `entity_type` / `entity_id` |
 | --- | --- | --- | --- |
@@ -383,19 +383,24 @@ Ordering: `created_at DESC`, then `id DESC` — same as `GET /api/reviews`.
 
 **Success response:** `200`, `Content-Disposition: attachment; filename="reviews-export.csv"`.
 
-CSV columns (semicolon-delimited, Russian headers):
+CSV columns (semicolon-delimited, Russian headers, localized display values — raw enum
+values are never published in these columns; `app/services/display_labels.py` is the
+single source for every mapping below and is shared by all three `/export` endpoints):
 
-| Column | Source |
-| --- | --- |
-| ID проверки | `review.id` |
-| ID документа | `review.document_id` |
-| Название документа | parent `document.title` (via a single JOIN — no N+1 query) |
-| Дата создания | `review.created_at` |
-| Требуется ручная проверка | `review.needs_review` as `true`/`false` |
-| Уверенность | `review.confidence` |
-| Готовность документа | `review.readiness` |
-| Коды причин | `review.reason_codes` joined with `\|`, in catalogue order |
-| Ошибка | `review.error`, or empty string when `null` |
+| Column | Source | Display value |
+| --- | --- | --- |
+| ID проверки | `review.id` | raw UUID string |
+| ID документа | `review.document_id` | raw UUID string |
+| Название документа | parent `document.title` (via a single JOIN — no N+1 query) | raw string |
+| Дата проверки | `review.created_at` | localized Moscow-time `ДД.ММ.ГГГГ, ЧЧ:ММ` (`format_datetime_ru`) |
+| Нужна экспертная проверка | `review.needs_review` | `Да` / `Нет` (`label_bool_yes_no`) |
+| Уверенность анализа | `review.confidence` | `high`→`Высокая`, `medium`→`Средняя`, `low`→`Низкая` (`label_confidence`) |
+| Статус готовности | `review.readiness` | `ready`→`Готов`, `needs_clarification`→`Требует уточнений`, `not_ready`→`Не готов` (`label_readiness`) |
+| Причины экспертной проверки | `review.reason_codes` | Russian reason-code labels joined with `\|`, in catalogue order (`label_reason_codes`) |
+| Ошибка | `review.error`, or empty string when `null` | fixed sanitized business-facing message — never the raw `LLMErrorCategory` value (see "Persistence and status outcomes" above) |
+
+An unrecognized future enum value falls back to the raw value unchanged instead of
+raising — the same policy the frontend's own `utils/labels.ts` mappings use.
 
 The full `review_json` is intentionally not included in this list export (would make the CSV unreadable) — use `GET /api/reviews/{review_id}/export` for a single review's complete data.
 
@@ -452,20 +457,22 @@ The full `review_json` is intentionally not included in this list export (would 
 
 **Success response:** `200`, `Content-Disposition: attachment; filename="review-{review_id}.csv"`.
 
-Two columns, one row per field:
+Two columns, one row per field. Same localized display values as `GET /api/reviews/export`
+above (`app/services/display_labels.py`) for every field except the last, which stays raw
+technical JSON:
 
-| Поле | Значение |
+| Поле | Значение (source → display) |
 | --- | --- |
-| ID проверки | `review.id` |
-| ID документа | `review.document_id` |
-| Название документа | parent `document.title`, or empty string if the document is unavailable |
-| Дата создания | `review.created_at` |
-| Требуется ручная проверка | `review.needs_review` as `true`/`false` |
-| Уверенность | `review.confidence` |
-| Готовность документа | `review.readiness` |
-| Коды причин | `review.reason_codes` joined with `\|`, in catalogue order |
-| Ошибка | `review.error`, or empty string when `null` |
-| Полный результат JSON | the complete `FinalReview` (`review.review_json`), serialized as one deterministic JSON string (`ensure_ascii=false`, sorted keys) in a single cell — no data loss, `model_needs_review` never included |
+| ID проверки | `review.id` — raw UUID string |
+| ID документа | `review.document_id` — raw UUID string |
+| Название документа | parent `document.title`, or empty string if the document is unavailable — raw string |
+| Дата проверки | `review.created_at` — localized Moscow-time `ДД.ММ.ГГГГ, ЧЧ:ММ` (`format_datetime_ru`) |
+| Нужна экспертная проверка | `review.needs_review` — `Да` / `Нет` (`label_bool_yes_no`) |
+| Уверенность анализа | `review.confidence` — `high`→`Высокая`, `medium`→`Средняя`, `low`→`Низкая` (`label_confidence`) |
+| Статус готовности | `review.readiness` — `ready`→`Готов`, `needs_clarification`→`Требует уточнений`, `not_ready`→`Не готов` (`label_readiness`) |
+| Причины экспертной проверки | `review.reason_codes` — Russian reason-code labels joined with `\|`, in catalogue order (`label_reason_codes`) |
+| Ошибка | `review.error`, or empty string when `null` — fixed sanitized business-facing message, never the raw `LLMErrorCategory` value |
+| Полный результат JSON | the complete `FinalReview` (`review.review_json`), serialized as one deterministic JSON string (`ensure_ascii=false`, sorted keys) in a single cell — raw technical keys and enum values (e.g. `"confidence": "low"`), no data loss, `model_needs_review` never included |
 
 **Errors:**
 
@@ -521,7 +528,7 @@ The response body exposes a **`FinalReview`** (as `review_json` plus denormalize
 The audit row is written **before** returning a successful or fallback response. Both `entity_type` and `entity_id` are null. Every `ai.review` audit snapshot records these application constants inside `input_json` or `output_json` (not as database columns), together with the configured model name:
 
 ```text
-prompt_version = "spec-review-prompt-v1"
+prompt_version = "spec-review-prompt-v2"
 review_schema_version = "spec-review-schema-v1"
 ```
 
@@ -613,19 +620,24 @@ Ordering: `created_at DESC`, then `id DESC` — same as `GET /api/audit-runs`.
 
 **Success response:** `200`, `Content-Disposition: attachment; filename="audit-runs-export.csv"`.
 
-CSV columns (semicolon-delimited, Russian headers):
+CSV columns (semicolon-delimited, Russian headers, localized display values — raw enum
+values are never published in these columns; `app/services/display_labels.py` is the
+single source for every mapping below and is shared by all three `/export` endpoints):
 
-| Column | Source |
-| --- | --- |
-| ID записи | `audit_run.id` |
-| Действие | `audit_run.action` |
-| Тип сущности | `audit_run.entity_type`, or empty string when `null` |
-| ID сущности | `audit_run.entity_id`, or empty string when `null` |
-| Статус | `audit_run.status` |
-| Длительность, мс | `audit_run.duration_ms` |
-| Ошибка | `audit_run.error`, or empty string when `null` |
-| Дата создания | `audit_run.created_at` |
-| Детали JSON | `{"input_json": ..., "output_json": ...}` — both fields combined into one deterministic JSON string (`ensure_ascii=false`, sorted keys) in a single cell |
+| Column | Source | Display value |
+| --- | --- | --- |
+| ID записи | `audit_run.id` | raw UUID string |
+| Операция | `audit_run.action` | `document.create`→`Создание документа`, `document.review`→`Проверка документа`, `ai.review`→`Проверка текста без сохранения` (`label_audit_action`) |
+| Тип объекта | `audit_run.entity_type`, or empty string when `null` | `document`→`Документ`, `review`→`Проверка` (`label_audit_entity_type`) |
+| ID объекта | `audit_run.entity_id`, or empty string when `null` | raw UUID string |
+| Статус | `audit_run.status` | `success`→`Успешно`, `needs_review`→`Нужна экспертная проверка`, `error`→`Техническая ошибка` (`label_audit_status`) |
+| Длительность | `audit_run.duration_ms` | `< 1000`ms stays milliseconds (`"14 мс"`); `>= 1000`ms switches to one-decimal seconds with a comma separator (`"37,0 с"`) (`format_duration_ru`) |
+| Ошибка | `audit_run.error`, or empty string when `null` | raw sanitized error text (technical failures use the same fixed business-facing message as `Review.error` — never the raw `LLMErrorCategory` value) |
+| Дата и время | `audit_run.created_at` | localized Moscow-time `ДД.ММ.ГГГГ, ЧЧ:ММ` (`format_datetime_ru`) |
+| Детали JSON | `{"input_json": ..., "output_json": ...}` — both fields combined into one deterministic JSON string (`ensure_ascii=false`, sorted keys) in a single cell | raw technical keys and enum values (e.g. `"llm_error_category": "PROVIDER_ERROR"`), unchanged |
+
+An unrecognized future enum value falls back to the raw value unchanged instead of
+raising — the same policy the frontend's own `utils/labels.ts` mappings use.
 
 **Errors:**
 

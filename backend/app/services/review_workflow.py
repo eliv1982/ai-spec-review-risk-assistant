@@ -56,10 +56,10 @@ status outcomes"; DATA_MODEL.md, "DocumentStatus"/"AuditStatus"):
 
 A safe LLM fallback (`used_fallback=True`) is a *technical* failure that was safely
 contained, not a successful automated review: it is audited as `status="error"` with
-a non-empty, sanitized `audit_runs.error` (naming only the closed `LLMErrorCategory`
-value, never the original exception/message/traceback/provider payload), the
-persisted `Review.error` carries the same sanitized message, and `Document.status`
-becomes `review_failed` — signalling that the automated pipeline itself did not
+a non-empty, sanitized `audit_runs.error` — a fixed business-facing message, never the
+`LLMErrorCategory` value, the original exception, message, traceback, or provider
+payload — and the persisted `Review.error` carries the same sanitized message.
+`Document.status` becomes `review_failed` — signalling that the automated pipeline did not
 complete, distinct from `reviewed` (a completed automated review, regardless of
 whether its *content* also sets `needs_review=True`). `used_fallback` and
 `llm_error_category` are additionally recorded as orchestration metadata inside the
@@ -105,9 +105,8 @@ _UNEXPECTED_ERROR_AUDIT_MESSAGE = (
     "Не удалось выполнить workflow проверки документа из-за непредвиденной ошибки приложения."
 )
 
-_FALLBACK_ERROR_MESSAGE_TEMPLATE = (
-    "Проверка документа вернула безопасный резервный результат "
-    "(категория ошибки LLM: {category})."
+_FALLBACK_ERROR_MESSAGE = (
+    "Проверку не удалось выполнить автоматически. Результат требует экспертной проверки."
 )
 
 
@@ -256,16 +255,15 @@ def _prepare_persistence_outcome(orchestration_result: ReviewOrchestrationResult
     if orchestration_result.used_fallback:
         # Technical failure, safely contained: audited as `error`, not as a
         # successful/needs-review outcome (API_CONTRACTS.md, "Persistence and
-        # status outcomes"). `llm_error_category` is safe to read via `.value`
-        # here: `_validate_orchestration_result` already confirmed it is a real
-        # `LLMErrorCategory` member.
+        # status outcomes"). The stored `error` is a fixed business-facing
+        # message — it never names `llm_error_category`, which is recorded
+        # separately as technical audit metadata (`output_json`, built below
+        # in `ReviewWorkflow.run()`), not read here.
         return _PersistenceOutcome(
             final_review=final_review,
             audit_status=AuditStatus.error,
             document_status=DocumentStatus.review_failed,
-            outcome_error=_FALLBACK_ERROR_MESSAGE_TEMPLATE.format(
-                category=orchestration_result.llm_error_category.value
-            ),
+            outcome_error=_FALLBACK_ERROR_MESSAGE,
         )
     if final_review.needs_review:
         return _PersistenceOutcome(

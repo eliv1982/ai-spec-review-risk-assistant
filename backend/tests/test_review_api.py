@@ -338,12 +338,17 @@ def test_document_review_safe_fallback_returns_normal_success_response(client, d
     assert body["needs_review"] is True
     assert root_code.value in body["reason_codes"]
     assert body["error"]
-    assert category.value in body["error"]
+    # The business-facing error is a fixed message and never names the raw
+    # LLM error category (task: "API_ERROR, CONFIGURATION_ERROR... показывать
+    # только в служебном/техническом блоке") — the category still lives on,
+    # separately, as technical audit metadata (`output_json`, below).
+    assert category.value not in body["error"]
+    assert body["error"] == "Проверку не удалось выполнить автоматически. Результат требует экспертной проверки."
 
     audit = _document_review_audit(db_session, body["id"])
     assert audit.status == "error"
     assert audit.error
-    assert category.value in audit.error
+    assert category.value not in audit.error
     assert audit.output_json["used_fallback"] is True
     assert audit.output_json["llm_error_category"] == category.value
 
@@ -361,7 +366,7 @@ def test_document_review_safe_fallback_returns_normal_success_response(client, d
     review_body = review_get.json()
     assert review_body["needs_review"] is True
     assert review_body["error"]
-    assert category.value in review_body["error"]
+    assert category.value not in review_body["error"]
 
     # GET the audit log back filtered to errors: the fallback's audit row is
     # discoverable through the same `errors_only=true` query the frontend audit
@@ -563,7 +568,9 @@ def test_ai_review_fallback_returns_normal_response(client, db_session):
     assert len(audits) == 1
     assert audits[0].status == "error"
     assert audits[0].error
-    assert "TRANSPORT_ERROR" in audits[0].error
+    # Business-facing error text never names the raw LLM error category — it
+    # still lives on, separately, in `output_json.llm_error_category` below.
+    assert "TRANSPORT_ERROR" not in audits[0].error
     assert audits[0].entity_type is None
     assert audits[0].entity_id is None
     assert audits[0].output_json["needs_review"] is True
@@ -885,6 +892,41 @@ def test_document_review_openapi_description_distinguishes_fallback_from_manual_
     assert "Document.status=reviewed" in description
 
 
+def test_document_review_openapi_description_does_not_claim_category_in_business_error(client):
+    """Regression for the documentation-reconciliation fix: the description
+    previously implied `Review.error` is filled with "безопасным описанием
+    категории сбоя" (a safe *description of the failure category*) — wrong,
+    since the actual runtime `error` is one fixed, category-independent
+    business message (`app/services/review_workflow.py::_FALLBACK_ERROR_MESSAGE`)
+    and the real `LLMErrorCategory` value is never folded into it. The category
+    is only ever recorded separately, as technical audit metadata
+    (`AuditRun.output_json.llm_error_category`). Checked via key contract
+    fragments, not the full paragraph, so this stays robust to unrelated
+    wording changes."""
+    schema = client.get("/openapi.json").json()
+    operation = schema["paths"]["/api/documents/{document_id}/review"]["post"]
+    description = operation.get("description")
+    assert description
+
+    # The old, incorrect claim that Review.error holds a category description
+    # must be gone.
+    assert "описанием категории сбоя" not in description
+
+    # The business error is documented as a fixed, safe, user-facing message.
+    assert "фиксированным безопасным" in description
+    assert "Review.error" in description
+
+    # No specific failure-category enum value is ever presented as part of
+    # what the business `Review.error` may contain.
+    assert "API_ERROR" not in description
+    assert "CONFIGURATION_ERROR" not in description
+    assert "LLMErrorCategory" not in description
+
+    # The technical metadata field where the category *does* live is named
+    # explicitly — this is the desired, qualified reference.
+    assert "AuditRun.output_json.llm_error_category" in description
+
+
 # ---------------------------------------------------------------------------
 # 11. Stateless ai.review audit snapshot (MAJOR 2)
 #
@@ -975,7 +1017,9 @@ def test_ai_review_audit_snapshot_safe_fallback(client, db_session):
     audit = audits[0]
     assert audit.status == "error"
     assert audit.error
-    assert "SCHEMA_MISMATCH" in audit.error
+    # Business-facing error text never names the raw LLM error category — it
+    # still lives on, separately, in `output_json.llm_error_category` below.
+    assert "SCHEMA_MISMATCH" not in audit.error
 
     assert audit.input_json["model"] == "gpt-test-model"
     assert audit.input_json["prompt_version"] == PROMPT_VERSION

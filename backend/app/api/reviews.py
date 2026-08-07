@@ -11,14 +11,15 @@ from app.repositories.review_repository import ReviewRepository
 from app.schemas.common import PaginatedResponse
 from app.schemas.review import ReviewResponse
 from app.services.csv_export import build_csv_response, serialize_json_cell
+from app.services.display_labels import (
+    format_datetime_ru,
+    label_bool_yes_no,
+    label_confidence,
+    label_readiness,
+    label_reason_codes,
+)
 
 router = APIRouter()
-
-REASON_CODE_DELIMITER = "|"
-
-
-def _bool_cell(value: bool) -> str:
-    return "true" if value else "false"
 
 
 def _none_to_empty(value: Optional[str]) -> str:
@@ -93,11 +94,11 @@ def export_reviews(
             "ID проверки",
             "ID документа",
             "Название документа",
-            "Дата создания",
-            "Требуется ручная проверка",
-            "Уверенность",
-            "Готовность документа",
-            "Коды причин",
+            "Дата проверки",
+            "Нужна экспертная проверка",
+            "Уверенность анализа",
+            "Статус готовности",
+            "Причины экспертной проверки",
             "Ошибка",
         ]
     ]
@@ -107,11 +108,11 @@ def export_reviews(
                 review.id,
                 review.document_id,
                 review.document.title if review.document is not None else "",
-                review.created_at,
-                _bool_cell(bool(review.needs_review)),
-                review.confidence,
-                review.readiness,
-                REASON_CODE_DELIMITER.join(review.reason_codes_json),
+                format_datetime_ru(review.created_at),
+                label_bool_yes_no(bool(review.needs_review)),
+                label_confidence(review.confidence),
+                label_readiness(review.readiness),
+                label_reason_codes(review.reason_codes_json),
                 _none_to_empty(review.error),
             ]
         )
@@ -151,11 +152,11 @@ def export_review(review_id: UUID, db: Session = Depends(get_db)) -> Response:
         ["ID проверки", review.id],
         ["ID документа", review.document_id],
         ["Название документа", document.title if document is not None else ""],
-        ["Дата создания", review.created_at],
-        ["Требуется ручная проверка", _bool_cell(bool(review.needs_review))],
-        ["Уверенность", review.confidence],
-        ["Готовность документа", review.readiness],
-        ["Коды причин", REASON_CODE_DELIMITER.join(review.reason_codes_json)],
+        ["Дата проверки", format_datetime_ru(review.created_at)],
+        ["Нужна экспертная проверка", label_bool_yes_no(bool(review.needs_review))],
+        ["Уверенность анализа", label_confidence(review.confidence)],
+        ["Статус готовности", label_readiness(review.readiness)],
+        ["Причины экспертной проверки", label_reason_codes(review.reason_codes_json)],
         ["Ошибка", _none_to_empty(review.error)],
         ["Полный результат JSON", serialize_json_cell(review.review_json)],
     ]

@@ -13,9 +13,11 @@ import {
   labelCategory,
   labelConfidence,
   labelDocumentStatus,
+  labelNeedsReview,
   labelReadiness,
   labelSeverity,
 } from "../utils/labels";
+import { formatDateTime } from "../utils/formatting";
 
 type LoadState =
   | { status: "loading" }
@@ -182,7 +184,7 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
             </p>
             <p>
               <Link to="/">Вернуться к созданию документа</Link> ·{" "}
-              <Link to="/reviews">К списку проверок</Link>
+              <Link to="/reviews">К истории проверок</Link>
             </p>
           </div>
         </main>
@@ -198,7 +200,7 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
               Повторить попытку
             </button>
             <Link to="/reviews" className="button button-secondary">
-              К списку проверок
+              К истории проверок
             </Link>
             <Link to="/" className="button button-secondary">
               Вернуться к созданию документа
@@ -232,15 +234,15 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
               </dd>
             </div>
             <div>
-              <dt>Создано</dt>
-              <dd>{review.created_at}</dd>
+              <dt>Дата проверки</dt>
+              <dd>{formatDateTime(review.created_at)}</dd>
             </div>
             <div>
-              <dt>Готовность документа</dt>
+              <dt>Статус готовности</dt>
               <dd>{labelReadiness(review.readiness)}</dd>
             </div>
             <div>
-              <dt>Уверенность оценки</dt>
+              <dt>Уверенность анализа</dt>
               <dd>{labelConfidence(review.confidence)}</dd>
             </div>
           </dl>
@@ -292,7 +294,7 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
                 </div>
                 <div>
                   <dt>Создан</dt>
-                  <dd>{documentState.document.created_at}</dd>
+                  <dd>{formatDateTime(documentState.document.created_at)}</dd>
                 </div>
                 <div>
                   <dt>Статус документа</dt>
@@ -307,19 +309,18 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
 
         {review.needs_review ? (
           <div className="banner banner-warning" role="alert">
-            <strong className="banner-title">Требуется ручная проверка</strong>
+            <strong className="banner-title">{labelNeedsReview(true)}</strong>
             <p className="banner-text">
-              Автоматическая проверка не может дать окончательное заключение по этому документу.
-              Рекомендуем, чтобы специалист проверил его вручную перед дальнейшей работой.
+              Результат требует проверки специалистом перед дальнейшей работой с документом.
             </p>
           </div>
         ) : (
           <div className="banner banner-success" role="status">
-            <strong className="banner-title">Ручная проверка не требуется</strong>
+            <strong className="banner-title">{labelNeedsReview(false)}</strong>
             <p className="banner-text">
-              Автоматическая проверка не выявила оснований для обязательного ручного рассмотрения.
-              Это не гарантирует полное отсутствие ошибок — при необходимости документ можно
-              дополнительно проверить вручную.
+              Автоматическая проверка не выявила оснований для обязательного экспертного
+              рассмотрения. Это не гарантирует полное отсутствие ошибок — при необходимости
+              документ можно дополнительно проверить вручную.
             </p>
           </div>
         )}
@@ -336,21 +337,21 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
         )}
 
         <section className="card">
-          <h2>Резюме</h2>
+          <h2>Краткое заключение</h2>
           <p className="long-text">{finalReview.summary}</p>
         </section>
 
         <section className="card">
           <h2>Риски</h2>
           {finalReview.risks.length === 0 ? (
-            <p className="empty-state">В результате проверки риски не указаны.</p>
+            <p className="empty-state">Риски не выявлены.</p>
           ) : (
             <ul className="item-list">
               {finalReview.risks.map((risk, index) => (
                 <li key={index} className="item-card">
                   <div className="item-card-header">
                     <span className={`badge badge-severity-${risk.severity}`}>
-                      Серьёзность: {labelSeverity(risk.severity)}
+                      Уровень риска: {labelSeverity(risk.severity)}
                     </span>
                     <span className="badge badge-neutral">{labelCategory(risk.category)}</span>
                   </div>
@@ -369,7 +370,7 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
         <section className="card">
           <h2>Недостающие требования</h2>
           {finalReview.missing_requirements.length === 0 ? (
-            <p className="empty-state">В результате проверки недостающие требования не указаны.</p>
+            <p className="empty-state">Недостающие требования не выявлены.</p>
           ) : (
             <ul className="item-list">
               {finalReview.missing_requirements.map((item, index) => (
@@ -387,7 +388,7 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
         <section className="card">
           <h2>Противоречия</h2>
           {finalReview.contradictions.length === 0 ? (
-            <p className="empty-state">В результате проверки противоречия не указаны.</p>
+            <p className="empty-state">Противоречия не выявлены.</p>
           ) : (
             <ul className="item-list">
               {finalReview.contradictions.map((item, index) => (
@@ -411,7 +412,7 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
         <section className="card">
           <h2>Вопросы для уточнения</h2>
           {finalReview.questions_to_client.length === 0 ? (
-            <p className="empty-state">В результате проверки уточняющие вопросы не указаны.</p>
+            <p className="empty-state">Уточняющие вопросы не сформированы.</p>
           ) : (
             <ul className="item-list-simple">
               {finalReview.questions_to_client.map((question, index) => (
@@ -426,7 +427,7 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
         <section className="card">
           <h2>Критерии приёмки</h2>
           {finalReview.acceptance_criteria.length === 0 ? (
-            <p className="empty-state">В результате проверки критерии приёмки не указаны.</p>
+            <p className="empty-state">Критерии приёмки не сформированы.</p>
           ) : (
             <ul className="item-list-simple">
               {finalReview.acceptance_criteria.map((criterion, index) => (
@@ -446,20 +447,20 @@ export function ReviewResultPage({ reviewId }: ReviewResultPageProps) {
         )}
 
         <section className="card">
-          <h2>Технические данные проверки</h2>
+          <h2>Служебные данные</h2>
           <p className="lead">
             Полный сохранённый объект <code>review_json</code> в техническом JSON-формате — для
             диагностики и сверки с тем, что показано выше.
           </p>
-          <JsonBlock title="review_json (JSON)" value={review.review_json} />
+          <JsonBlock title="JSON результата" value={review.review_json} />
         </section>
 
         <div className="form-actions">
           <Link to="/reviews" className="button button-secondary">
-            К списку проверок
+            К истории проверок
           </Link>
           <Link to="/" className="button button-primary">
-            Создать новый документ
+            Проверить другой документ
           </Link>
         </div>
       </div>
@@ -485,7 +486,7 @@ export function ReviewResultRoute() {
         <div className="container">
           <ErrorBanner title="Некорректная ссылка" message="Не указан идентификатор проверки." />
           <p>
-            <Link to="/">Вернуться к созданию документа</Link> · <Link to="/reviews">К списку проверок</Link>
+            <Link to="/">Вернуться к созданию документа</Link> · <Link to="/reviews">К истории проверок</Link>
           </p>
         </div>
       </main>

@@ -6,7 +6,7 @@ _CYRILLIC_RE = re.compile(r"[а-яА-ЯёЁ]")
 
 
 def test_prompt_version_literal():
-    assert PROMPT_VERSION == "spec-review-prompt-v1"
+    assert PROMPT_VERSION == "spec-review-prompt-v2"
 
 
 def test_review_schema_version_literal():
@@ -62,6 +62,16 @@ def test_prompt_covers_risk_and_contradiction_evidence_rules():
 def test_prompt_requires_model_needs_review_flag_semantics():
     assert "model_needs_review=true" in SYSTEM_PROMPT
     assert "model_needs_review=false" in SYSTEM_PROMPT
+
+
+def test_prompt_requires_russian_acceptance_criteria_format():
+    # REGRESSION: acceptance criteria must be generated in Russian, in an
+    # "Если ..., когда ..., то ..." shape, with an explicit prohibition on
+    # the English Given/When/Then template — which used to be offered as a
+    # permitted example and read unnaturally mixed into an otherwise Russian
+    # business document.
+    assert "Если <условие>, когда <действие>, то <ожидаемый результат>" in SYSTEM_PROMPT
+    assert "не используй английские слова Given/When/Then" in SYSTEM_PROMPT
 
 
 def test_prompt_does_not_duplicate_json_schema_boilerplate():

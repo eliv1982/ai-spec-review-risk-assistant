@@ -42,7 +42,7 @@
   недоверенным данным, игнорировать встроенные в документ инструкции, не выдумывать
   находки и никогда не возвращать `needs_review`/`review_reason_codes` или иные поля
   вне схемы `ModelReviewDraft`; закреплены версии:
-  `PROMPT_VERSION = "spec-review-prompt-v1"`, `REVIEW_SCHEMA_VERSION = "spec-review-schema-v1"`;
+  `PROMPT_VERSION = "spec-review-prompt-v2"`, `REVIEW_SCHEMA_VERSION = "spec-review-schema-v1"`;
 - автоматические тесты на изолированной временной базе SQLite, включая обширные тесты
   строгих схем, детерминированного QC, фабрики отката, prompt-констант и LLM-клиента.
   Тесты клиента полностью офлайн: большинство используют инжектируемый fake/stub-клиент
@@ -87,8 +87,10 @@
   определяются в первую очередь по `used_fallback`, и только затем — по
   `FinalReview.needs_review` (docs/API_CONTRACTS.md, "Persistence and status outcomes";
   docs/DATA_MODEL.md, "DocumentStatus"/"AuditStatus"): `used_fallback=True` → аудит
-  `status="error"` с непустым безопасным `error` (называет только закрытую категорию
-  `LLMErrorCategory`, никогда исходное исключение/сообщение/трассировку/ответ провайдера) и
+  `status="error"` с непустым безопасным `error` — фиксированным бизнес-сообщением, без
+  названия категории `LLMErrorCategory`, исходного исключения, сообщения, трассировки или
+  ответа провайдера; сама категория `LLMErrorCategory` остаётся доступна отдельно, только в
+  техническом `audit_runs.output_json.llm_error_category`, и
   `Document.status="review_failed"`; иначе — `False → success`, `True → needs_review`, и в
   обоих случаях `Document.status="reviewed"` с `error=null`. Безопасный LLM-fallback — это
   технический сбой, безопасно локализованный, а не успешный автоматический review: тот же
@@ -140,7 +142,10 @@ orchestration/QC/fallback/persistence в роутере:
   формы и с тем же кодом, что задокументированы в `../docs/API_CONTRACTS.md`.
   Безопасный LLM-fallback, который `ReviewWorkflow` уже превратил в пригодный к
   сохранению `FinalReview`, возвращается обычным успешным `201`-ответом
-  (`needs_review=true`, непустой `error` с безопасным описанием категории сбоя), а
+  (`needs_review=true`, непустой `error` с фиксированным безопасным пользовательским
+  сообщением, не зависящим от конкретной категории `LLMErrorCategory` — сама категория
+  сбоя (`API_ERROR`, `CONFIGURATION_ERROR` и т. д.) в business `error` не публикуется и
+  доступна только в техническом `AuditRun.output_json.llm_error_category`), а
   не HTTP-ошибкой; сохранённый `Document.status` при этом — `review_failed`, а не
   `reviewed` (см. `ReviewWorkflow` выше). Duplicate error-audit невозможен:
   единственную `AuditRun(status="error")`-строку для непредвиденного сбоя пишет
@@ -293,17 +298,24 @@ pip install -r requirements.txt
 cp ../.env.example ../.env
 ```
 
-`OPENAI_API_KEY` не требуется для запуска приложения и не требуется для тестов: ни один
-эндпоинт пока не вызывает клиент OpenAI, а тесты `app/llm/` либо используют
-инжектируемый fake-клиент, либо настоящий SDK с HTTP-ответами, подменёнными через
-`httpx.MockTransport` — в обоих случаях без обращения к реальному OpenAI API.
+`OPENAI_API_KEY` не требуется для запуска приложения и не требуется для тестов. В
+рантайме оба review-эндпоинта (`POST /api/documents/{document_id}/review` и
+`POST /api/ai/review`) при валидной конфигурации выполняют настоящий запрос к OpenAI
+Structured Outputs через `OpenAIReviewClient`; при отсутствующем/невалидном
+`OPENAI_API_KEY`, сбое модели или невалидном ответе они не падают, а возвращают
+безопасный fallback (`ReviewOrchestrator` перехватывает типизированный
+`LLMClientError` и строит `FinalReview` через `build_fallback_review` — см.
+"Текущий этап" выше). Тесты `app/llm/` этот реальный вызов не выполняют: они либо
+используют инжектируемый fake-клиент, либо настоящий SDK с HTTP-ответами,
+подменёнными через `httpx.MockTransport` — в обоих случаях без обращения к реальному
+OpenAI API.
 
 ### Переменные окружения (`.env.example`)
 
 | Переменная | Назначение |
 | --- | --- |
-| `OPENAI_API_KEY` | ключ OpenAI; читается `OpenAIReviewClient`, но пока не вызывается ни одним эндпоинтом |
-| `OPENAI_MODEL` | название модели OpenAI; читается `OpenAIReviewClient`, но пока не вызывается ни одним эндпоинтом |
+| `OPENAI_API_KEY` | ключ OpenAI; читается `OpenAIReviewClient` при каждом реальном вызове review-эндпоинтов; при отсутствии — безопасный fallback, а не падение |
+| `OPENAI_MODEL` | название модели OpenAI, используемое `OpenAIReviewClient` при вызове review-эндпоинтов |
 | `DATABASE_URL` | строка подключения к SQLite, по умолчанию `sqlite:///./data/app.db` |
 | `BACKEND_CORS_ORIGINS` | разрешённые origin'ы для CORS (без `*`) |
 

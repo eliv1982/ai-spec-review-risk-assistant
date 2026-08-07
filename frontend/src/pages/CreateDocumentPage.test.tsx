@@ -106,6 +106,70 @@ describe("CreateDocumentPage", () => {
     vi.unstubAllGlobals();
   });
 
+  it("показывает актуальные бизнес-формулировки: заголовок, placeholder'ы, primary-кнопку", async () => {
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <CreateDocumentPage />
+      </MemoryRouter>,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "ИИ-рецензент требований и технических заданий" }),
+    ).toBeInTheDocument();
+
+    const titleInput = screen.getByLabelText(/название документа/i) as HTMLInputElement;
+    expect(titleInput.placeholder).toBe("Например: Требования к модулю уведомлений");
+
+    // The task explicitly removed the narrow word "спецификация" from this
+    // placeholder — regression-test the absence directly, not just the
+    // presence of the new wording.
+    const textArea = screen.getByLabelText(/текст документа/i) as HTMLTextAreaElement;
+    expect(textArea.placeholder).toBe(
+      "Вставьте техническое задание, требования, описание функции или задачи на автоматизацию…",
+    );
+    expect(textArea.placeholder.toLowerCase()).not.toContain("спецификац");
+
+    expect(
+      screen.getByRole("button", { name: "Сохранить документ и запустить проверку" }),
+    ).toBeInTheDocument();
+  });
+
+  it("после создания документа показывает кнопку «Проверить другой документ»", async () => {
+    const reviewDeferredResp = createDeferred<Response>();
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && url.endsWith("/documents")) {
+        return Promise.resolve(jsonResponse(DOCUMENT_RESPONSE, 201));
+      }
+      if (method === "POST" && url.endsWith("/documents/doc-1/review")) {
+        return reviewDeferredResp.promise;
+      }
+      return Promise.reject(new Error(`unexpected request: ${method} ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <CreateDocumentPage />
+      </MemoryRouter>,
+    );
+
+    await fillForm(user);
+    await user.click(
+      screen.getByRole("button", { name: /сохранить документ и запустить проверку/i }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Проверить другой документ" }),
+    ).toBeInTheDocument();
+
+    // The pending review request is left unresolved intentionally: the
+    // assertion above is the point of this test, and resolving it here would
+    // trigger a post-test navigate() state update outside of `act(...)`.
+  });
+
   it("не отправляет запрос, пока обязательные поля пусты", async () => {
     const user = userEvent.setup();
     render(
@@ -115,7 +179,7 @@ describe("CreateDocumentPage", () => {
     );
 
     const submitButton = screen.getByRole("button", {
-      name: /создать документ и запустить проверку/i,
+      name: /сохранить документ и запустить проверку/i,
     });
     expect(submitButton).toBeDisabled();
 
@@ -161,7 +225,7 @@ describe("CreateDocumentPage", () => {
     await user.type(screen.getByLabelText(/название документа/i), "  Заголовок  ");
     await user.type(screen.getByLabelText(/текст документа/i), `  ${DOCUMENT_TEXT}  `);
     await user.click(
-      screen.getByRole("button", { name: /создать документ и запустить проверку/i }),
+      screen.getByRole("button", { name: /сохранить документ и запустить проверку/i }),
     );
 
     await waitFor(() => expect(findCall(fetchMock, "POST", "/documents")).toBeDefined());
@@ -208,7 +272,7 @@ describe("CreateDocumentPage", () => {
 
     await fillForm(user);
     await user.click(
-      screen.getByRole("button", { name: /создать документ и запустить проверку/i }),
+      screen.getByRole("button", { name: /сохранить документ и запустить проверку/i }),
     );
 
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -250,7 +314,7 @@ describe("CreateDocumentPage", () => {
 
     await fillForm(user);
     await user.click(
-      screen.getByRole("button", { name: /создать документ и запустить проверку/i }),
+      screen.getByRole("button", { name: /сохранить документ и запустить проверку/i }),
     );
 
     expect(
@@ -289,7 +353,7 @@ describe("CreateDocumentPage", () => {
 
     await fillForm(user);
     await user.click(
-      screen.getByRole("button", { name: /создать документ и запустить проверку/i }),
+      screen.getByRole("button", { name: /сохранить документ и запустить проверку/i }),
     );
 
     expect(await screen.findByText("Внутренняя ошибка сервера")).toBeInTheDocument();
@@ -352,7 +416,7 @@ describe("CreateDocumentPage", () => {
 
     await fillForm(user);
     await user.click(
-      screen.getByRole("button", { name: /создать документ и запустить проверку/i }),
+      screen.getByRole("button", { name: /сохранить документ и запустить проверку/i }),
     );
 
     expect(await screen.findByText("Не удалось выполнить проверку документа.")).toBeInTheDocument();

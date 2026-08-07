@@ -240,7 +240,7 @@ CSV export (`/reviews/export`, `/reviews/{review_id}/export`, `/audit-runs/expor
 Every AI-invoking audit snapshot (`document.review` and `ai.review`) records these application constants inside `input_json` or `output_json` (not as database columns), together with the configured model name:
 
 ```text
-prompt_version = "spec-review-prompt-v1"
+prompt_version = "spec-review-prompt-v2"
 review_schema_version = "spec-review-schema-v1"
 ```
 
