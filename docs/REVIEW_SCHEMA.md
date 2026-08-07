@@ -1,121 +1,106 @@
-# Review Schema
+# Схема проверки
 
-This document defines two distinct schemas:
+Документ определяет две разные строгие схемы:
 
-1. **`ModelReviewDraft`** — untrusted OpenAI Structured Outputs payload, validated by Pydantic before deterministic QC.
-2. **`FinalReview`** — backend-produced object stored in `reviews.review_json` and returned by the API.
+1. **`ModelReviewDraft`** — недоверенный ответ OpenAI Structured Outputs, который
+   Pydantic валидирует до детерминированного QC.
+2. **`FinalReview`** — объект, создаваемый backend, сохраняемый в
+   `reviews.review_json` и возвращаемый API.
 
-The **backend**, not the LLM, writes `needs_review` and `review_reason_codes`. The model cannot propose, select, or preserve any reason code.
+Поля `needs_review` и `review_reason_codes` формирует только backend. LLM не может
+предлагать, выбирать или сохранять reason codes.
 
----
+## A. `ModelReviewDraft`
 
-## A. ModelReviewDraft
-
-Strict schema returned by OpenAI Structured Outputs and validated by Pydantic **before** deterministic QC.
-
-| Field | Type | Required | Description |
+| Поле | Тип | Обязательно | Описание |
 | --- | --- | --- | --- |
-| `summary` | string | yes | Concise review summary |
-| `risks` | array of Risk | yes | Identified risks; may be empty |
-| `missing_requirements` | array of MissingRequirement | yes | Gaps; may be empty |
-| `contradictions` | array of Contradiction | yes | Contradictions; may be empty |
-| `questions_to_client` | array of string | yes | Clarifying questions; may be empty |
-| `acceptance_criteria` | array of string | yes | Measurable acceptance criteria; may be empty |
-| `confidence` | enum | yes | Model confidence label |
-| `document_readiness` | enum | yes | Readiness assessment proposed by the model |
-| `model_needs_review` | boolean | yes | Model-proposed manual-review flag |
+| `summary` | string | да | Краткое заключение. |
+| `risks` | array of `Risk` | да | Риски; может быть пустым. |
+| `missing_requirements` | array of `MissingRequirement` | да | Пробелы; может быть пустым. |
+| `contradictions` | array of `Contradiction` | да | Противоречия; может быть пустым. |
+| `questions_to_client` | `array[string]` | да | Уточняющие вопросы; может быть пустым. |
+| `acceptance_criteria` | `array[string]` | да | Измеримые критерии; может быть пустым. |
+| `confidence` | enum | да | Уверенность модели. |
+| `document_readiness` | enum | да | Предложенная моделью готовность документа. |
+| `model_needs_review` | strict boolean | да | Предложенный моделью флаг ручной проверки. |
 
-Rules:
+Правила:
 
-- `model_needs_review` is a required boolean proposed by the model;
-- `ModelReviewDraft` must **not** contain `needs_review`;
-- `ModelReviewDraft` must **not** contain `review_reason_codes`;
-- the model cannot propose, select, or preserve any reason code;
-- **additional properties are forbidden** on the top-level object and on every nested object (`Risk`, `MissingRequirement`, `Contradiction`).
+- `ModelReviewDraft` не содержит `needs_review` или `review_reason_codes`;
+- `model_needs_review` принимает только настоящее логическое значение JSON, без приведения строк или
+  чисел;
+- top-level и все вложенные объекты используют `extra="forbid"`;
+- draft никогда не сохраняется как `reviews.review_json` и не возвращается API.
 
-`ModelReviewDraft` is never persisted as `reviews.review_json` and is never returned by the API.
+### Валидация строк
 
-### String validation
+Pydantic выполняет trim каждой обязательной строки и отклоняет пустое значение. Правило
+действует для:
 
-Pydantic validates every required string **after trimming whitespace**. Required strings must not be empty after trim. This applies to:
+- `summary`;
+- `risks[].description`;
+- `risks[].evidence`, если это не `null`;
+- `missing_requirements[].description`;
+- `contradictions[].description`;
+- каждого элемента `contradictions[].evidence`;
+- каждого элемента `questions_to_client`;
+- каждого элемента `acceptance_criteria`.
 
-- `summary`
-- `risks[].description`
-- `risks[].evidence` when not `null`
-- `missing_requirements[].description`
-- `contradictions[].description`
-- each string in `contradictions[].evidence`
-- each string in `questions_to_client`
-- each string in `acceptance_criteria`
+Пустая после trim строка приводит к fallback с `SCHEMA_MISMATCH`, а не к успешной
+проверке. Пустые массивы разрешены там, где это указано схемой.
 
-A blank required string after trimming fails Pydantic validation and follows the `SCHEMA_MISMATCH` fallback path. It is not treated as a successful review.
+## B. `FinalReview`
 
-Empty arrays remain allowed for list fields where the schema permits them.
-
----
-
-## B. FinalReview
-
-Backend-produced object stored in `reviews.review_json` and returned inside API responses (including standalone `POST /api/ai/review` and the single-review CSV export's `Полный результат JSON` cell).
-
-| Field | Type | Required | Description |
+| Поле | Тип | Обязательно | Описание |
 | --- | --- | --- | --- |
-| `summary` | string | yes | Copied from draft or fallback template |
-| `risks` | array of Risk | yes | Copied from draft or empty in fallback |
-| `missing_requirements` | array of MissingRequirement | yes | Copied from draft or empty in fallback |
-| `contradictions` | array of Contradiction | yes | Copied from draft or empty in fallback |
-| `questions_to_client` | array of string | yes | Copied from draft or fallback template |
-| `acceptance_criteria` | array of string | yes | Copied from draft or empty in fallback |
-| `confidence` | enum | yes | From draft or `"low"` in fallback |
-| `document_readiness` | enum | yes | From draft or `"not_ready"` in fallback |
-| `needs_review` | boolean | yes | Written **only** by the backend |
-| `review_reason_codes` | array of ReasonCode | yes | Written **only** by the backend |
+| `summary` | string | да | Из draft или фиксированного шаблона fallback. |
+| `risks` | `array[Risk]` | да | Из draft; в fallback пустой. |
+| `missing_requirements` | `array[MissingRequirement]` | да | Из draft; в fallback пустой. |
+| `contradictions` | `array[Contradiction]` | да | Из draft; в fallback пустой. |
+| `questions_to_client` | `array[string]` | да | Из draft или фиксированного шаблона fallback. |
+| `acceptance_criteria` | `array[string]` | да | Из draft; в fallback пустой. |
+| `confidence` | enum | да | Из draft или `low` в fallback. |
+| `document_readiness` | enum | да | Из draft или `not_ready` в fallback. |
+| `needs_review` | `StrictBool` | да | Только backend. |
+| `review_reason_codes` | `array[ReviewReasonCode]` | да | Только backend. |
 
-Rules:
+`FinalReview` не содержит `model_needs_review`, запрещает лишние поля и используется в
+JSON-ответах, `reviews.review_json` и ячейке «Полный результат JSON» подробного CSV.
 
-- `model_needs_review` is **not** persisted or returned as part of `FinalReview`;
-- `needs_review` is written only by the backend;
-- `review_reason_codes` is written only by the backend;
-- **additional properties remain forbidden**.
+## Вложенные типы
 
----
+### `Risk`
 
-## Nested types
-
-Shared by `ModelReviewDraft` and `FinalReview`. Additional properties forbidden on each nested object.
-
-### Risk
-
-| Field | Type | Required | Nullable |
+| Поле | Тип | Обязательно | Nullable |
 | --- | --- | --- | --- |
-| `severity` | `low` \| `medium` \| `high` | yes | no |
-| `category` | Category | yes | no |
-| `description` | string | yes | no |
-| `evidence` | string \| null | yes | yes — `null` when no direct excerpt is available |
+| `severity` | `low` \| `medium` \| `high` | да | нет |
+| `category` | `RiskCategory` | да | нет |
+| `description` | string | да | нет |
+| `evidence` | string \| null | да | да; `null`, если прямого фрагмента нет |
 
-### MissingRequirement
+### `MissingRequirement`
 
-| Field | Type | Required | Nullable |
+| Поле | Тип | Обязательно | Nullable |
 | --- | --- | --- | --- |
-| `category` | Category | yes | no |
-| `description` | string | yes | no |
+| `category` | `RiskCategory` | да | нет |
+| `description` | string | да | нет |
 
-### Contradiction
+### `Contradiction`
 
-| Field | Type | Required | Nullable |
+| Поле | Тип | Обязательно | Nullable |
 | --- | --- | --- | --- |
-| `description` | string | yes | no |
-| `evidence` | array of string | yes | no — may be empty; non-empty excerpts preferred when available |
+| `description` | string | да | нет |
+| `evidence` | `array[string]` | да | нет; массив может быть пустым |
 
----
+Во всех трёх типах лишние поля запрещены.
 
-## Enumerations
+## Значения enum
 
-### Category (risks and missing requirements)
+### `RiskCategory`
 
-Closed string enum. Implementations must reject unknown values at schema validation.
+Закрытый enum для рисков и недостающих требований:
 
-| Value |
+| Значение |
 | --- |
 | `scope` |
 | `functionality` |
@@ -133,42 +118,42 @@ Closed string enum. Implementations must reject unknown values at schema validat
 | `compliance` |
 | `other` |
 
-### confidence
+### `confidence`
 
-| Value | Meaning |
+| Значение | Смысл |
 | --- | --- |
-| `high` | Strong signal in the source text; limited ambiguity |
-| `medium` | Partial ambiguity or incomplete detail |
-| `low` | Weak, vague, or unreliable basis for conclusions |
+| `high` | В исходном тексте достаточно сильных подтверждений и мало неоднозначности. |
+| `medium` | Есть частичная неоднозначность или недостающие детали. |
+| `low` | Основание для выводов слабое, расплывчатое или ненадёжное. |
 
-### document_readiness
+### `document_readiness`
 
-| Value | Meaning |
+| Значение | Смысл |
 | --- | --- |
-| `ready` | Sufficient for implementation planning with minor gaps |
-| `needs_clarification` | Proceed only after answering key questions |
-| `not_ready` | Material gaps or contradictions block readiness |
+| `ready` | Документа достаточно для планирования реализации при небольших пробелах. |
+| `needs_clarification` | До продолжения необходимо получить ответы на ключевые вопросы. |
+| `not_ready` | Существенные пробелы или противоречия блокируют готовность. |
 
-### review_reason_codes (catalogue order)
+### `review_reason_codes`
 
-Backend-only closed set. Catalogue order is the required normalization order:
+Это закрытый backend-only каталог. Порядок ниже является обязательным порядком
+нормализации:
 
-| Order | Code | Class | Exact condition |
+| Порядок | Код | Класс | Точное условие |
 | --- | --- | --- | --- |
-| 1 | `LOW_CONFIDENCE` | content-derived | `confidence == "low"` on a validated `ModelReviewDraft` |
-| 2 | `TOO_VAGUE_INPUT` | content-derived or optional on fallback | original input fails the exact vagueness thresholds |
-| 3 | `CONTRADICTORY_INPUT` | content-derived | `len(contradictions) > 0` on a validated `ModelReviewDraft` |
-| 4 | `MISSING_ACCEPTANCE_CRITERIA` | content-derived | `acceptance_criteria` is empty on a validated `ModelReviewDraft` |
-| 5 | `INSUFFICIENT_QUESTIONS` | content-derived | input is vague **and** `len(questions_to_client) < 3` on a validated `ModelReviewDraft` |
-| 6 | `INVALID_JSON` | failure-provenance only | response cannot be parsed as JSON |
-| 7 | `SCHEMA_MISMATCH` | failure-provenance only | parsed data fails the strict Pydantic `ModelReviewDraft` schema |
-| 8 | `MODEL_ERROR` | failure-provenance only | provider/API/transport/model-call failure |
+| 1 | `LOW_CONFIDENCE` | content-derived | `confidence == "low"` в валидном `ModelReviewDraft`. |
+| 2 | `TOO_VAGUE_INPUT` | содержательный (`content-derived`) или дополнительный в fallback | Исходный текст не проходит точные пороги расплывчатости. |
+| 3 | `CONTRADICTORY_INPUT` | содержательный (`content-derived`) | `len(contradictions) > 0` в валидном draft. |
+| 4 | `MISSING_ACCEPTANCE_CRITERIA` | содержательный (`content-derived`) | `acceptance_criteria` пуст в валидном draft. |
+| 5 | `INSUFFICIENT_QUESTIONS` | content-derived | Текст расплывчатый и `len(questions_to_client) < 3`. |
+| 6 | `INVALID_JSON` | источник сбоя (`failure-provenance`) | Ответ нельзя разобрать как JSON. |
+| 7 | `SCHEMA_MISMATCH` | источник сбоя (`failure-provenance`) | Разобранные данные не соответствуют строгой Pydantic-схеме. |
+| 8 | `MODEL_ERROR` | источник сбоя (`failure-provenance`) | Сбой конфигурации, провайдера, API, транспорта или вызова модели. |
 
-`MODEL_ERROR`, `INVALID_JSON`, and `SCHEMA_MISMATCH` must **never** occur in a successfully parsed and validated model review.
+`MODEL_ERROR`, `INVALID_JSON`, `SCHEMA_MISMATCH` не появляются на пути успешно
+валидированного draft.
 
----
-
-## Exact vagueness definition
+## Точное определение расплывчатости
 
 ```text
 normalized_text = " ".join(text.split())
@@ -178,17 +163,14 @@ too_vague =
   OR len(normalized_text.split(" ")) < 30
 ```
 
-No additional application-defined vagueness heuristics are permitted in the approved MVP.
+Пустая нормализованная строка всегда расплывчата. Других application-defined эвристик
+для этого признака нет.
 
----
-
-## Backend construction from a validated ModelReviewDraft
-
-For a successfully parsed and Pydantic-validated `ModelReviewDraft`:
+## Построение `FinalReview` из валидного draft
 
 ```text
 deterministic_reason_codes =
-  reason codes whose documented backend conditions actually fired
+  коды, точные backend-условия которых выполнились
 
 final_needs_review =
   model_review_draft.model_needs_review
@@ -198,23 +180,21 @@ final_review.review_reason_codes =
   deterministic_reason_codes
 ```
 
-The backend reconstructs `final_review.review_reason_codes` **exclusively** from verified conditions. It must not union, preserve, copy, filter, or otherwise use model-provided reason codes, because the model does not return them.
+Backend заново формирует список только из подтверждённых условий, дедуплицирует и
+сортирует его в порядке каталога. Модель не возвращает список, поэтому модельные коды
+не копируются, не фильтруются и не объединяются.
 
-### Content-derived codes (successful path only)
+### Условия успешного пути
 
-| Code | Exact condition |
+| Код | Точное условие |
 | --- | --- |
-| `LOW_CONFIDENCE` | only when `confidence == "low"` |
-| `TOO_VAGUE_INPUT` | only when the original input fails the exact documented thresholds |
-| `CONTRADICTORY_INPUT` | only when `len(contradictions) > 0` |
-| `MISSING_ACCEPTANCE_CRITERIA` | only when `acceptance_criteria` is empty |
-| `INSUFFICIENT_QUESTIONS` | only when the input is vague and `len(questions_to_client) < 3` |
+| `LOW_CONFIDENCE` | Только `confidence == "low"`. |
+| `TOO_VAGUE_INPUT` | Только исходный текст не проходит указанные пороги. |
+| `CONTRADICTORY_INPUT` | Только `len(contradictions) > 0`. |
+| `MISSING_ACCEPTANCE_CRITERIA` | Только пустой `acceptance_criteria`. |
+| `INSUFFICIENT_QUESTIONS` | Только расплывчатый вход и меньше трёх вопросов. |
 
-Content-derived codes must **not** be inferred from synthetic fallback fields.
-
-### model_needs_review without deterministic codes
-
-If `model_needs_review=true` but no deterministic condition fires:
+Если `model_needs_review=true`, но ни одно детерминированное условие не сработало:
 
 ```json
 {
@@ -223,46 +203,30 @@ If `model_needs_review=true` but no deterministic condition fires:
 }
 ```
 
-Do **not** add a new reason code merely to explain the model flag.
+Новый код для объяснения модельного флага не добавляется. Аудит для такого результата:
+`status="needs_review"`, `error=null`.
 
-Audit for this case: `status="needs_review"`, `error=null`.
+Если `final_needs_review=false`, массив `review_reason_codes` обязан быть пустым.
+Содержательные (`content-derived`) коды не выводятся из искусственных fallback-полей.
 
-### When final_needs_review is false
+## Источник технического сбоя (`failure-provenance`) и безопасный fallback
 
-If `final_needs_review=false`, `review_reason_codes` must be `[]`.
-
-### Normalization
-
-- Deduplicate reason codes.
-- Order by the fixed catalogue order above.
-- On the successful path, only content-derived codes (plus never failure-provenance codes) may appear.
-
-`FinalReview.needs_review` is set to `final_needs_review`. Content fields are copied from the draft into `FinalReview` without exposing `model_needs_review`.
-
----
-
-## Failure-only reason codes and safe fallback
-
-Failure-provenance codes are backend-generated only:
-
-| Failure provenance | Root technical code |
+| Причина | Корневой код |
 | --- | --- |
-| provider/API/transport/model-call failure | `MODEL_ERROR` |
-| response cannot be parsed as JSON | `INVALID_JSON` |
-| parsed data fails strict Pydantic `ModelReviewDraft` schema (including blank required string after trim) | `SCHEMA_MISMATCH` |
+| Сбой конфигурации, провайдера, API, транспорта или вызова модели | `MODEL_ERROR` |
+| Ответ не разбирается как JSON | `INVALID_JSON` |
+| JSON не соответствует `ModelReviewDraft`, включая пустую обязательную строку | `SCHEMA_MISMATCH` |
 
-They must never occur on a successfully parsed and validated `ModelReviewDraft`.
-
-### Safe FinalReview fallback
+Нормативный fallback из текущей реализации:
 
 ```json
 {
-  "summary": "Automated review could not be completed reliably. Manual review is required.",
+  "summary": "Автоматическая проверка не может быть выполнена надёжно. Требуется ручная проверка.",
   "risks": [],
   "missing_requirements": [],
   "contradictions": [],
   "questions_to_client": [
-    "Can you provide a more complete and specific requirements document?"
+    "Можете ли вы предоставить более полный и конкретный документ с требованиями?"
   ],
   "acceptance_criteria": [],
   "confidence": "low",
@@ -272,104 +236,94 @@ They must never occur on a successfully parsed and validated `ModelReviewDraft`.
 }
 ```
 
-| Failure mode | Root-cause codes | Optional append |
+Точные строки `summary` и единственного вопроса выше совпадают с
+`backend/app/services/review_qc.py`.
+
+| Технический исход | Обязательный корневой код | Дополнительный код |
 | --- | --- | --- |
-| Model/API/transport failure | `["MODEL_ERROR"]` | `TOO_VAGUE_INPUT` if original input fails vagueness thresholds |
-| JSON parse failure | `["INVALID_JSON"]` | `TOO_VAGUE_INPUT` if original input fails vagueness thresholds |
-| Schema validation failure | `["SCHEMA_MISMATCH"]` | `TOO_VAGUE_INPUT` if original input fails vagueness thresholds |
+| Сбой модели/API/транспорта/конфигурации/провайдера | `MODEL_ERROR` | `TOO_VAGUE_INPUT`, если исходный текст расплывчатый |
+| Сбой разбора JSON | `INVALID_JSON` | `TOO_VAGUE_INPUT`, если исходный текст расплывчатый |
+| Сбой валидации схемы | `SCHEMA_MISMATCH` | `TOO_VAGUE_INPUT`, если исходный текст расплывчатый |
 
-Always:
+Итоговый массив всегда сортируется по каталогу. Поэтому для расплывчатого входа
+`TOO_VAGUE_INPUT` располагается перед `INVALID_JSON`, `SCHEMA_MISMATCH` или
+`MODEL_ERROR`, несмотря на то что технический код остаётся корневой причиной.
 
-- `needs_review=true`
-- `confidence="low"`
-- `document_readiness="not_ready"`
-- empty `risks`, `missing_requirements`, `contradictions`, `acceptance_criteria`
-- no fabricated domain-specific findings
-- do not invent extra questions beyond the single safe question above
-- do not add `LOW_CONFIDENCE`, `MISSING_ACCEPTANCE_CRITERIA`, `INSUFFICIENT_QUESTIONS`, or `CONTRADICTORY_INPUT` from synthetic fallback fields
+Fallback всегда имеет:
 
-### Persisted technical fallback
+- `needs_review=true`;
+- `confidence="low"`;
+- `document_readiness="not_ready"`;
+- пустые `risks`, `missing_requirements`, `contradictions`, `acceptance_criteria`;
+- ровно один фиксированный вопрос;
+- отсутствие выдуманных domain findings;
+- отсутствие `LOW_CONFIDENCE`, `MISSING_ACCEPTANCE_CRITERIA`,
+  `INSUFFICIENT_QUESTIONS`, `CONTRADICTORY_INPUT`, выведенных из искусственных полей.
 
-When a safe fallback `FinalReview` (above) is successfully persisted for a
-document-backed review:
+## Семантика сохранённого fallback
 
-- `Review` is stored (not skipped);
-- `review_json` contains the valid safe fallback `FinalReview` shown above;
-- `Review.needs_review = true`;
-- `Review.error` is a non-empty, sanitized string (never `null`): a fixed,
-  business-facing message, never the raw exception/message/traceback/provider
-  payload, and never the `LLMErrorCategory` value either — that value is recorded
-  separately, only as technical metadata in `AuditRun.output_json.llm_error_category`;
-- `AuditRun.status = "error"`;
-- `AuditRun.error` is the same non-empty, sanitized string;
-- `Document.status = "review_failed"` — **not** `reviewed`: a persisted fallback is a
-  technical failure that was safely contained, not a completed automated review;
-- the endpoint still returns HTTP `201`, because a usable `Review` row was in fact
-  saved.
+Если fallback успешно сохраняется для проверки документа:
 
-### Successful manual review (not a technical fallback)
+- создаётся `Review` с валидным fallback в `review_json`;
+- `Review.needs_review=true`;
+- `Review.error` содержит точную фиксированную строку
+  `Проверку не удалось выполнить автоматически. Результат требует экспертной проверки.`;
+- `AuditRun.status="error"`, а `AuditRun.error` содержит ту же строку;
+- `AuditRun.output_json.llm_error_category` хранит отдельную безопасную техническую
+  категорию;
+- `Document.status="review_failed"`;
+- endpoint возвращает HTTP `201`, поскольку пригодный `Review` сохранён.
 
-Kept distinct from the above: a successfully parsed and validated `ModelReviewDraft`
-that the backend flags for manual attention (deterministic codes and/or
-`model_needs_review=true`, "model_needs_review without deterministic codes" above)
-is **not** a technical failure:
+Необработанное исключение, его сообщение, трассировка, ответ провайдера и значение
+`LLMErrorCategory` не попадают в предназначенные пользователю
+`Review.error`/`AuditRun.error`.
 
-- `needs_review = true`;
-- `Review.error = null`;
-- `AuditRun.status = "needs_review"`;
-- `AuditRun.error = null`;
-- `Document.status = "reviewed"`.
+Успешно валидированный результат с `needs_review=true` — другой исход:
 
-`needs_review=true` alone never indicates a technical failure — only `used_fallback`
-(the orchestrator's own typed outcome) does. See [ARCHITECTURE.md](ARCHITECTURE.md)
-and [API_CONTRACTS.md](API_CONTRACTS.md) for the full outcome matrix.
+- `Review.error=null`;
+- `AuditRun.status="needs_review"`;
+- `AuditRun.error=null`;
+- `Document.status="reviewed"`.
 
----
+Технический fallback определяется по `used_fallback`, а не по `needs_review`,
+`confidence`, `readiness` или reason codes.
 
-## Schema version literal
-
-The approved MVP review schema version string recorded in every AI-invoking audit snapshot is:
-
-```text
-review_schema_version = "spec-review-schema-v1"
-```
-
-The companion prompt version string is:
+## Версии prompt и схемы
 
 ```text
 prompt_version = "spec-review-prompt-v2"
+review_schema_version = "spec-review-schema-v1"
 ```
 
-These are application constants stored inside audit `input_json` or `output_json`, not new database columns. A material schema change requires a new `review_schema_version` literal; previous literals must not be silently reused.
+Это прикладные константы внутри снимка AI-аудита, а не колонки БД. Материальное
+изменение prompt или review schema требует нового литерала версии.
 
----
-
-## Example ModelReviewDraft
+## Пример `ModelReviewDraft`
 
 ```json
 {
-  "summary": "The brief outlines a notification feature but leaves data retention and failure handling unspecified.",
+  "summary": "В брифе описана функция уведомлений, но не определены хранение данных и обработка сбоев.",
   "risks": [
     {
       "severity": "high",
       "category": "reliability",
-      "description": "No retry or dead-letter behaviour is defined for failed deliveries.",
-      "evidence": "Notifications are sent to users when events occur."
+      "description": "Для неуспешной доставки не определены повторные попытки и очередь недоставленных сообщений.",
+      "evidence": "При наступлении события система отправляет пользователю уведомление."
     }
   ],
   "missing_requirements": [
     {
       "category": "data",
-      "description": "Retention period for notification history is not specified."
+      "description": "Не указан срок хранения истории уведомлений."
     }
   ],
   "contradictions": [],
   "questions_to_client": [
-    "What is the retention period for notification history?",
-    "Should failed deliveries be retried, and with what policy?"
+    "Каков срок хранения истории уведомлений?",
+    "Нужно ли повторять неуспешную доставку и по какой политике?"
   ],
   "acceptance_criteria": [
-    "Если пользователь подписан и наступает триггерное событие, когда событие обработано, то пользователь получает ровно одно уведомление в течение 60 секунд в штатном режиме работы.",
+    "Если пользователь подписан на уведомления, когда наступает подтверждённое событие, то система доставляет ровно одно уведомление в течение 60 секунд.",
     "Если доставка завершилась ошибкой, когда попытки повтора исчерпаны, то ошибка фиксируется и становится видна оператору."
   ],
   "confidence": "medium",
@@ -378,34 +332,34 @@ These are application constants stored inside audit `input_json` or `output_json
 }
 ```
 
-## Example FinalReview after QC
+## Пример `FinalReview` после QC
 
-Assuming the original input is not vague and no content-derived condition fires:
+Если исходный текст не расплывчатый и другие детерминированные условия не сработали:
 
 ```json
 {
-  "summary": "The brief outlines a notification feature but leaves data retention and failure handling unspecified.",
+  "summary": "В брифе описана функция уведомлений, но не определены хранение данных и обработка сбоев.",
   "risks": [
     {
       "severity": "high",
       "category": "reliability",
-      "description": "No retry or dead-letter behaviour is defined for failed deliveries.",
-      "evidence": "Notifications are sent to users when events occur."
+      "description": "Для неуспешной доставки не определены повторные попытки и очередь недоставленных сообщений.",
+      "evidence": "При наступлении события система отправляет пользователю уведомление."
     }
   ],
   "missing_requirements": [
     {
       "category": "data",
-      "description": "Retention period for notification history is not specified."
+      "description": "Не указан срок хранения истории уведомлений."
     }
   ],
   "contradictions": [],
   "questions_to_client": [
-    "What is the retention period for notification history?",
-    "Should failed deliveries be retried, and with what policy?"
+    "Каков срок хранения истории уведомлений?",
+    "Нужно ли повторять неуспешную доставку и по какой политике?"
   ],
   "acceptance_criteria": [
-    "Если пользователь подписан и наступает триггерное событие, когда событие обработано, то пользователь получает ровно одно уведомление в течение 60 секунд в штатном режиме работы.",
+    "Если пользователь подписан на уведомления, когда наступает подтверждённое событие, то система доставляет ровно одно уведомление в течение 60 секунд.",
     "Если доставка завершилась ошибкой, когда попытки повтора исчерпаны, то ошибка фиксируется и становится видна оператору."
   ],
   "confidence": "medium",
@@ -415,24 +369,16 @@ Assuming the original input is not vague and no content-derived condition fires:
 }
 ```
 
-Notes:
+## Соответствие персистентности и API
 
-- If `model_needs_review=false` and no deterministic condition fires → `needs_review=false`, `review_reason_codes=[]`.
-- If `model_needs_review=true` and no deterministic condition fires → `needs_review=true`, `review_reason_codes=[]` (no invented code).
-- If `acceptance_criteria` is empty on a validated draft → backend adds `MISSING_ACCEPTANCE_CRITERIA` and `needs_review=true`.
-
----
-
-## Alignment with persistence and API
-
-| FinalReview field | SQLite column | API field |
+| Поле `FinalReview` | SQLite | API |
 | --- | --- | --- |
-| full `FinalReview` object | `review_json` | `review_json` |
+| весь объект | `review_json` | `review_json` |
 | `confidence` | `confidence` | `confidence` |
 | `document_readiness` | `readiness` | `readiness` |
 | `needs_review` | `needs_review` | `needs_review` |
 | `review_reason_codes` | `reason_codes_json` | `reason_codes` |
 
-`model_needs_review` is never stored in SQLite review columns and never appears in list, detail, standalone AI, or export responses.
-
-See [DATA_MODEL.md](DATA_MODEL.md) and [API_CONTRACTS.md](API_CONTRACTS.md).
+`model_needs_review` не появляется в review-колонках SQLite, JSON API или CSV-экспорте.
+Связанные документы: [DATA_MODEL.md](DATA_MODEL.md),
+[API_CONTRACTS.md](API_CONTRACTS.md), [ARCHITECTURE.md](ARCHITECTURE.md).

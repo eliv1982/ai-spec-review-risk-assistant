@@ -1,47 +1,59 @@
-# Project Scope
+# Границы проекта
 
-## Goal
+## Цель
 
-Build a production-style MVP for reviewing technical specifications, project requirements, feature requests, automation briefs and business requirements.
+Создать MVP промышленного уровня для проверки технических спецификаций, проектных
+требований, feature request'ов, брифов на автоматизацию и бизнес-требований.
 
-## Core Functionality
+## Основная функциональность
 
-- create and store documents
-- run an LLM review with strict structured output
-- deterministic validation and quality control
-- manual-review workflow with `needs_review` and reason codes
-- document, review and audit views
-- CSV export
-- SQLite persistence
-- Docker-based reproducible startup
-- automated tests and 10 test documents
+- создание и хранение документов;
+- LLM-проверка со строгим структурированным выводом;
+- детерминированная валидация и контроль качества;
+- процесс экспертной проверки с `needs_review` и reason codes;
+- представления документов, проверок и аудита в пределах утверждённого пользовательского
+  сценария;
+- CSV-экспорт;
+- персистентность SQLite;
+- воспроизводимый запуск через Docker;
+- автоматические тесты и 10 тестовых документов.
 
-## In Scope
+## В границах проекта
 
-- FastAPI backend
-- SQLAlchemy 2
-- SQLite
-- Pydantic v2
-- OpenAI structured outputs
-- React/Vite frontend
-- audit logging
-- safe fallback when the model fails or returns invalid output
+- FastAPI backend;
+- SQLAlchemy 2;
+- SQLite;
+- Pydantic v2;
+- OpenAI Structured Outputs;
+- React/Vite frontend;
+- журналирование аудита;
+- безопасный fallback при сбое модели или невалидном ответе.
 
-## Out of Scope
+## Вне границ проекта
 
-- authentication and roles
-- PDF, DOCX and OCR
-- RAG and vector databases
-- document version comparison
-- generation of a rewritten specification
-- messaging integrations
-- multi-user collaboration
-- production deployment; deployment is optional after the local MVP is complete
+- прикладная аутентификация и роли;
+- PDF, DOCX и OCR;
+- RAG и векторные базы данных;
+- сравнение версий документов;
+- генерация переписанной спецификации;
+- интеграции с мессенджерами;
+- совместная работа нескольких пользователей;
+- обязательное production-развёртывание: после завершения локального MVP оно было
+  явно необязательным дополнительным шагом.
 
-## Quality Principles
+## Принципы качества
 
-- the backend makes the final `needs_review` decision
-- LLM output is never trusted without schema and business-rule validation
-- failures produce a safe review result and an audit record
-- secrets must never be committed
-- scope expansion requires an explicit decision
+- окончательное решение `needs_review` принимает backend;
+- ответ LLM не считается доверенным до проверки схемы и бизнес-правил;
+- сбои приводят к безопасному результату и записи аудита в пределах документированных
+  гарантий персистентности;
+- секреты никогда не добавляются в Git;
+- расширение границ требует явного решения.
+
+## Итоговое состояние
+
+Обязательный локальный MVP завершён. После его завершения было дополнительно реализовано
+и проверено ранее необязательное production-развёртывание на
+<https://spec-review.elivcloud.org>. Инфраструктурная Basic Auth в Traefik ограничивает
+доступ к развёртыванию, но не добавляет в продукт прикладную аутентификацию, пользователей,
+роли или изоляцию арендаторов и поэтому не изменяет утверждённые границы продукта.

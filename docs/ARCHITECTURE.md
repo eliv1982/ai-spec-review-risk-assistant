@@ -1,287 +1,262 @@
-# Architecture
+# Архитектура
 
-## System purpose and users
+## Назначение и пользователи
 
-**AI Specification Review & Risk Assistant** is a web application that reviews technical specifications, project requirements, feature requests, automation briefs, and business requirements.
+**AI Specification Review & Risk Assistant** проверяет технические спецификации,
+проектные требования, feature request'ы, брифы на автоматизацию и бизнес-требования.
+Система:
 
-The system:
+- выявляет риски, недостающие требования и противоречия;
+- формирует вопросы клиенту и измеримые критерии приёмки;
+- получает строгий структурированный ответ от LLM;
+- применяет детерминированную backend-валидацию после ответа модели;
+- отмечает сомнительные результаты через `needs_review=true`;
+- записывает ключевые изменяющие операции в `audit_runs`;
+- при техническом сбое возвращает безопасный fallback без выдуманных находок.
 
-- identifies risks, missing requirements, and contradictions;
-- generates questions for the client;
-- generates measurable acceptance criteria;
-- uses strict LLM structured output;
-- applies deterministic backend validation after the LLM response;
-- marks uncertain or invalid results with `needs_review=true`;
-- records every key action in `audit_runs`;
-- returns a safe fallback instead of inventing information.
+Основные пользователи MVP — аналитики, владельцы продукта и инженеры. Продукт не является
+LegalTech-системой и не позиционируется как средство анализа договоров.
 
-Primary users for the MVP are analysts, product owners, and engineers who paste or store specification text and inspect review results locally. The product is **not** LegalTech-specific and must **not** be described as a contract-review system.
+## Архитектурный стиль
 
-## Architectural style
+Приложение реализовано как **модульный монолит**:
 
-The MVP is a **modular monolith**:
+- один процесс FastAPI отвечает за API, прикладные сервисы, персистентность,
+  LLM-вызовы, QC, аудит и экспорт;
+- один React/Vite frontend обращается к API по HTTP;
+- одна SQLite база содержит документы, проверки и записи аудита.
 
-- one FastAPI process owns API, services, persistence, LLM calls, quality control, audit, and export;
-- one React + Vite frontend talks to that API over HTTP;
-- one SQLite database stores documents, reviews, and audit runs.
+Этот стиль сохраняет атомарные границы проверки, валидации и аудита без микросервисов,
+очередей и распределённых транзакций. Код разделён на модули, но backend остаётся
+единым модулем развёртывания.
 
-A modular monolith is used because the MVP has a single deployment unit, a small team surface, and tightly coupled review/validation/audit steps. Module boundaries keep concerns separable without introducing microservices, queues, or distributed infrastructure.
-
-## Component diagram
+## Компоненты
 
 ```mermaid
 flowchart LR
-  subgraph Frontend["React + Vite"]
-    DocsUI["Documents"]
-    ReviewsUI["Reviews"]
-    DetailUI["Review Details"]
-    AuditUI["Audit"]
+  subgraph UI["React + Vite"]
+    Create["Проверить документ"]
+    History["История проверок"]
+    Detail["Результат проверки"]
+    AuditPage["Журнал аудита"]
   end
 
-  subgraph Backend["FastAPI modular monolith"]
+  subgraph Backend["FastAPI — модульный монолит"]
     API["API layer"]
-    Config["Configuration"]
-    DB["Database / SQLAlchemy"]
-    DocSvc["Document service"]
-    ReviewSvc["Review service"]
-    LLM["LLM client"]
-    QC["Quality-control service"]
-    AuditSvc["Audit service"]
-    ExportSvc["Export service"]
+    DocSvc["DocumentService"]
+    Workflow["ReviewWorkflow / AIReviewService"]
+    Orchestrator["ReviewOrchestrator"]
+    LLM["OpenAIReviewClient"]
+    QC["Deterministic QC"]
+    AuditSvc["AuditService"]
+    Export["CSV export"]
+    DB["SQLAlchemy repositories"]
   end
 
   SQLite[(SQLite)]
   OpenAI["OpenAI Structured Outputs"]
 
-  DocsUI --> API
-  ReviewsUI --> API
-  DetailUI --> API
-  AuditUI --> API
-
+  Create --> API
+  History --> API
+  Detail --> API
+  AuditPage --> API
   API --> DocSvc
-  API --> ReviewSvc
-  API --> AuditSvc
-  API --> ExportSvc
-  API --> Config
-
-  ReviewSvc --> DocSvc
-  ReviewSvc --> LLM
-  ReviewSvc --> QC
-  ReviewSvc --> AuditSvc
+  API --> Workflow
+  API --> Export
+  DocSvc --> AuditSvc
   DocSvc --> DB
-  ReviewSvc --> DB
-  AuditSvc --> DB
-  ExportSvc --> DB
-  DB --> SQLite
+  Workflow --> Orchestrator
+  Orchestrator --> LLM
   LLM --> OpenAI
+  Orchestrator --> QC
+  Workflow --> AuditSvc
+  Workflow --> DB
+  AuditSvc --> DB
+  Export --> DB
+  DB --> SQLite
 ```
 
-## End-to-end review flow
+## Полный workflow проверки документа
 
-1. User creates a document in the web panel (`POST /api/documents`).
-2. FastAPI validates input (`422` on validation failure) and atomically persists a `documents` row with `status=created` plus an audit row.
-3. User requests a review (`POST /api/documents/{document_id}/review`).
-4. Review service loads the document and calls the LLM client with OpenAI Structured Outputs using the **`ModelReviewDraft`** schema.
-5. Raw model output is parsed and validated as `ModelReviewDraft` (additional properties forbidden; required strings validated after trim; no `needs_review` or `review_reason_codes` fields).
-6. On successful parse/validation, the quality-control service builds a backend-only **`FinalReview`**: content copied from the draft, `needs_review` and `review_reason_codes` written exclusively by the backend from `model_needs_review` and verified deterministic conditions.
-7. On model, transport, JSON, or schema failure, the system builds a safe `FinalReview` fallback (failure-provenance reason codes only; content-derived QC is not inferred from synthetic fallback fields).
-8. A `FinalReview` from a successfully parsed draft is stored; document `status` becomes `reviewed` (`Review.error=null`, audit `status="success"` or `"needs_review"`). A safe `FinalReview` fallback (a *technical* failure, safely contained) is also stored, but document `status` becomes `review_failed`, `Review.error` is a non-empty sanitized summary, and audit `status="error"` with the same non-empty sanitized `error` — a persisted fallback is never reported as `reviewed`. Review, status update, and audit commit atomically in both cases. If no usable review can be stored at all, the failed review transaction rolls back and a recovery transaction sets `status=review_failed` and writes the error audit row.
-9. Frontend shows the review; uncertain cases appear with `needs_review=true` and `reason_codes`. `model_needs_review` is never exposed.
-10. User may export a review, the review list, or the audit journal as CSV (`GET /api/reviews/export`, `GET /api/reviews/{review_id}/export`, `GET /api/audit-runs/export`) — read-only `GET` requests that reuse the same filters/ordering as their list endpoints and never write an `audit_runs` row.
+1. Пользователь создаёт документ через `POST /api/documents`.
+2. FastAPI валидирует `title` и `text`, затем атомарно сохраняет `Document` со
+   `status="created"` и `AuditRun(action="document.create")`.
+3. Пользователь запускает `POST /api/documents/{document_id}/review`.
+4. `ReviewWorkflow` читает текст документа, закрывает read-транзакцию и вызывает
+   `ReviewOrchestrator` без открытой DB-транзакции.
+5. `OpenAIReviewClient` вызывает Responses API с `text_format=ModelReviewDraft`,
+   `store=False` и фиксированным русским system prompt.
+6. После `status="completed"` SDK разбирает Structured Outputs. Pydantic отклоняет
+   лишние поля, невалидные значения enum и пустые после trim обязательные строки.
+7. Для валидного `ModelReviewDraft` deterministic QC строит `FinalReview`.
+   `needs_review` и `review_reason_codes` задаёт только backend.
+8. При типизированной ошибке LLM orchestrator строит безопасный fallback `FinalReview`.
+9. Короткая write-транзакция повторно проверяет существование документа и атомарно
+   сохраняет `Review`, новый `Document.status` и `AuditRun`.
+10. Frontend переходит на `/reviews/:reviewId` и показывает исходный документ и
+    структурированный результат.
 
-Standalone AI demonstration:
+`POST /api/ai/review` использует тот же путь LLM → `ModelReviewDraft` → QC →
+`FinalReview`, но не создаёт `documents` и `reviews`: до ответа сохраняется только
+`AuditRun(action="ai.review", entity_type=null, entity_id=null)`.
 
-- `POST /api/ai/review` runs the same LLM → `ModelReviewDraft` → QC → `FinalReview` pipeline on submitted text.
-- It returns `FinalReview`, not the raw `ModelReviewDraft`.
-- It does **not** create `documents` or `reviews` rows.
-- It **does** create an `audit_runs` row before returning a successful or fallback response.
-- Both `entity_type` and `entity_id` are null.
+## Backend-модули
 
-## Backend modules
+### Слой API
 
-### API layer
+Роутеры в `backend/app/api/` публикуют `/api/*`, сопоставляют HTTP-статусы и вызывают
+прикладные сервисы. Невалидные тела, параметры запроса/пути и UUID возвращают `422`.
+Ответы review endpoint'ов содержат `FinalReview` в `review_json` и денормализованные
+`confidence`, `readiness`, `needs_review`, `reason_codes`. Поле `model_needs_review`
+наружу не передаётся.
 
-Exposes REST endpoints under `/api/*`. Performs request/response mapping, HTTP status codes, and thin orchestration into application services. Does not embed business rules beyond input shape validation. Missing, invalid, blank-after-trim, or incorrectly typed request fields, and invalid UUID path/query values, return HTTP `422`. Review responses expose `FinalReview` via `review_json` and top-level `needs_review` / `reason_codes`. `model_needs_review` is never exposed. List responses use `reason_codes` (never the SQLite column name `reason_codes_json`).
+### Конфигурация
 
-### Configuration
+`backend/app/config.py` читает `OPENAI_API_KEY`, `OPENAI_MODEL`, `DATABASE_URL` и
+`BACKEND_CORS_ORIGINS` из окружения и корневого `.env`. Секреты не зашиты в код.
+OpenAI SDK-клиент создаётся лениво только при вызове проверки.
 
-Loads environment settings (for example `OPENAI_API_KEY`, `OPENAI_MODEL`, `DATABASE_URL`, `BACKEND_CORS_ORIGINS`). No secrets are hardcoded. Configuration is process-local for the MVP.
+### Персистентность
 
-### Database
-
-SQLAlchemy 2 models and session management against SQLite. Every connection must enable foreign-key enforcement:
+SQLAlchemy 2 работает с тремя таблицами: `documents`, `reviews`, `audit_runs`. Для
+каждого SQLite-соединения выполняется:
 
 ```sql
 PRAGMA foreign_keys = ON
 ```
 
-Owns schema for `documents`, `reviews`, and `audit_runs` only. Timestamps are stored and returned as canonical UTC ISO 8601 strings with a trailing `Z`. See [DATA_MODEL.md](DATA_MODEL.md).
+Временные метки хранятся как канонические строки UTC ISO 8601 с `Z`. Подробности:
+[DATA_MODEL.md](DATA_MODEL.md).
 
-### Document service
+### LLM client и граница доверия
 
-Creates and retrieves documents. Sets `DocumentStatus` transitions related to review outcomes (`created`, `reviewed`, `review_failed`). Does not call the LLM directly.
+`OpenAIReviewClient` возвращает валидный `ModelReviewDraft` или типизированный
+`LLMClientError`. Незавершённый ответ провайдера отклоняется до Structured Outputs
+post-parser. Клиент не пишет в БД, не строит `FinalReview` и не принимает окончательное
+решение `needs_review`.
 
-`review_failed` means the **latest** document-backed review attempt did not complete a trustworthy automated review: either a safe fallback review row was persisted after a technical failure (`Review.error` non-null), or no usable review row could be persisted at all. A later attempt updates the document's status again from its own outcome: `reviewed` on a genuine success, `review_failed` again on another fallback or failure.
+Текст документа считается недоверенными данными: prompt требует игнорировать команды
+внутри документа, не раскрывать prompt, не выдумывать факты и формировать текстовые
+значения результата на русском языке.
 
-### Review service
+### Детерминированный QC
 
-Orchestrates document-backed reviews: load document → call LLM client for `ModelReviewDraft` → validate schema → run quality control to produce `FinalReview` (or build safe fallback) → persist review → update document status → write audit. Owns the composition of the review pipeline and transaction boundaries described below.
-
-### LLM client
-
-Calls OpenAI Structured Outputs with the fixed **`ModelReviewDraft`** response schema. Returns a validated draft or a typed failure (timeout, API error, unparseable payload, schema mismatch). Does not write to the database, does not produce `FinalReview`, and does not decide final `needs_review` or `review_reason_codes`.
-
-### Quality-control service
-
-Applies deterministic rules **after successful Pydantic validation** of a `ModelReviewDraft`. Builds `FinalReview` with:
+Для успешно валидированного draft:
 
 ```text
-deterministic_reason_codes =
-  reason codes whose documented backend conditions actually fired
+deterministic_reason_codes = коды, условия которых подтверждены backend
 
 final_needs_review =
   model_review_draft.model_needs_review
   OR len(deterministic_reason_codes) > 0
 
-final_review.review_reason_codes =
-  deterministic_reason_codes
+final_review.review_reason_codes = deterministic_reason_codes
 ```
 
-Reason codes are reconstructed exclusively from verified backend conditions. The model does not return reason codes, so none are unioned, preserved, copied, filtered, or trusted from model output. Content-derived codes must not be inferred from synthetic fallback fields. Failure-provenance codes (`MODEL_ERROR`, `INVALID_JSON`, `SCHEMA_MISMATCH`) appear only on the fallback path. Returns a safe `FinalReview` when parsing or the model fails. See [REVIEW_SCHEMA.md](REVIEW_SCHEMA.md).
+Модель не возвращает reason codes, поэтому backend ничего не объединяет с модельным
+списком. Failure-provenance коды `MODEL_ERROR`, `INVALID_JSON`, `SCHEMA_MISMATCH`
+возникают только в fallback. Полный контракт: [REVIEW_SCHEMA.md](REVIEW_SCHEMA.md).
 
-### Audit service
+### Аудит
 
-Writes `audit_runs` for every key action. Records action name, entity references, sanitized input/output JSON, status (`success` | `needs_review` | `error`), error text, and `duration_ms`. Never stores API keys or other secrets. If a required audit row cannot be stored, the audited action must not be reported as successful.
+`AuditService` обеспечивает инвариант: при `status="error"` поле `error` содержит
+непустое очищенное сообщение, а при `success` или `needs_review` равно `null`.
+Снимки аудита хранят только безопасные метаданные, определённые в
+[DATA_MODEL.md](DATA_MODEL.md): длины полей, UUID, литералы версий, fallback-флаг,
+безопасную категорию и итоговые флаги. Полные `title`/`text`, `review_json`, ключи API,
+ответ провайдера и трассировка не сохраняются.
 
-### Export service
+### CSV-экспорт
 
-Produces CSV exports for three read-only `GET` endpoints — the review list, a single review (`Поле`/`Значение` layout with the full `FinalReview` as one JSON cell), and the audit journal — reusing each list endpoint's own filters and ordering, without pagination. Read-only with respect to review/audit content; does not re-run the LLM and never writes an `audit_runs` row: CSV export is not part of the audited action set, and an export failure is reported as a normal HTTP error response, never as an audit event.
+`GET /api/reviews/export`, `GET /api/reviews/{review_id}/export` и
+`GET /api/audit-runs/export` формируют UTF-8 с BOM, разделителем `;` и `\r\n`.
+Экспорт использует те же фильтры и сортировку, что list endpoint, но без пагинации.
+Каждая строковая ячейка защищается от formula injection. Экспорт доступен только для
+чтения, не вызывает
+LLM и не создаёт `audit_runs`.
 
-## Frontend sections
+## Реализованные разделы frontend
 
-### Documents
-
-List and create documents. Filter by `status`. Open a document and trigger review. List ordering is `created_at DESC`, then `id DESC`.
-
-### Reviews
-
-List stored reviews. Filter by `needs_review`, `confidence`, `readiness` (document readiness), and optional `document_id`. Display API field `reason_codes`.
-
-### Review Details
-
-Show full structured review: summary, risks, missing requirements, contradictions, questions, acceptance criteria, confidence, readiness, `needs_review`, `reason_codes`, and any error. Offer CSV export.
-
-### Audit
-
-List and inspect `audit_runs`. Filter by `status`, `action`, and `errors_only` (`errors_only=true` returns rows where `status == "error"` only). Support operational review of failures and manual-review cases.
-
-## Transaction boundaries
-
-| Action | Transaction rule |
-| --- | --- |
-| `document.create` | Document row and audit row are committed atomically. |
-| Successful document-backed review (parsed model result) | Review row, document status update to `reviewed`, and audit row are committed atomically. |
-| Persisted safe fallback | Fallback review row (`Review.error` non-null), document status **`review_failed`**, and **error** audit row (`audit_runs.error` non-null) are committed atomically. Still returned as HTTP `201`, never a `5xx`. |
-| No usable review can be stored | Roll back the failed review transaction. Use a **separate, best-effort recovery transaction** to set `document.status="review_failed"` and write the error audit row (`entity_type="document"`, `entity_id=<document id>`); the original failure is re-raised either way. |
-| Required audit cannot be stored | The audited action must not be reported as successful. |
-| `ai.review` | Write the audit row before returning a successful or fallback HTTP response. |
-| CSV export (`/reviews/export`, `/reviews/{review_id}/export`, `/audit-runs/export`) | Read-only `GET`; never writes an `audit_runs` row, on success or failure. Not part of the audited action set. |
-
-The recovery transaction above is **best-effort**, not a guarantee: if the underlying database is itself unavailable (or otherwise rejects the recovery write, including its own commit), the recovery `document.status`/error-audit write can itself fail. That secondary failure is swallowed so it never replaces or hides the original error — the original exception is always what propagates — but it means a repeat database failure at recovery time can leave `document.status` at its prior value with no error audit row for that attempt, rather than a guaranteed `review_failed` + audit trail.
-
-## Failure handling
-
-| Failure | Behaviour |
-| --- | --- |
-| Invalid request body / params / UUID | HTTP `422`; no domain mutation; no success audit |
-| Unknown document or review | HTTP `404` |
-| LLM API / transport failure | Safe fallback; `needs_review=true`; reason codes `["MODEL_ERROR"]` (+ `TOO_VAGUE_INPUT` if input independently fails vagueness thresholds); persist fallback with non-empty sanitized `Review.error` and set document `review_failed` when persistence succeeds; audit `status="error"` with non-empty sanitized `error` |
-| Invalid JSON | Safe fallback; reason codes `["INVALID_JSON"]` (+ optional `TOO_VAGUE_INPUT`); persist fallback with non-empty sanitized `Review.error` and set document `review_failed` when persistence succeeds; audit `status="error"` with non-empty sanitized `error` |
-| Schema validation failure | Safe fallback; reason codes `["SCHEMA_MISMATCH"]` (+ optional `TOO_VAGUE_INPUT`); persist fallback with non-empty sanitized `Review.error` and set document `review_failed` when persistence succeeds; audit `status="error"` with non-empty sanitized `error` |
-| Cannot persist usable review | Best-effort recovery transaction: document `status=review_failed` + audit `status="error"` with non-empty sanitized `error` on the document entity, when the recovery transaction itself succeeds; no `Review` row either way |
-| QC deterministic triggers on a successfully parsed `ModelReviewDraft` | Persist `FinalReview` with backend `needs_review=true` and deterministic `review_reason_codes`; document `reviewed`; audit `status="needs_review"` and `error=null` |
-| Validated draft with `model_needs_review=true` and no deterministic codes | Persist `FinalReview` with `needs_review=true` and `review_reason_codes=[]`; audit `status="needs_review"` and `error=null` |
-| Unexpected server error | HTTP `500`; audit `error` when the action was auditable; no invented review content |
-
-The system must return a safe fallback instead of inventing missing specification details.
-
-## Audit strategy
-
-Exact audit statuses:
-
-| Status | Meaning |
-| --- | --- |
-| `success` | The action completed without a technical error and manual review is not required |
-| `needs_review` | The model response was successfully parsed and validated, but the final deterministic result requires manual review |
-| `error` | Model, transport, JSON parsing, schema validation, or persistence failure occurred, including cases where a safe fallback was returned or persisted |
-
-Status / `error` field invariants:
-
-- when `audit_runs.status == "error"`, `audit_runs.error` must contain a non-empty sanitized error summary;
-- when `audit_runs.status` is `"success"` or `"needs_review"`, `audit_runs.error` must be `null`;
-- technical failures that return or persist a safe fallback still use `status="error"` with a non-null sanitized error summary;
-- successfully parsed and validated reviews requiring human attention use `status="needs_review"` and `error=null`.
-
-Raw credentials, headers, tokens, stack traces containing secrets, and provider credentials must never be stored in `error`, `input_json`, or `output_json`.
-
-Entity mapping:
-
-| Action | `entity_type` | `entity_id` |
+| Маршрут | Видимый раздел | Фактические возможности |
 | --- | --- | --- |
-| `document.create` | `document` | created document id |
-| `document.review` (successful or fallback-persisted) | `review` | created review id |
-| `document.review` (failure before a review exists) | `document` | document id |
-| `ai.review` | `null` | `null` |
+| `/` | «Проверить документ» | Поля «Название документа» и «Текст документа»; действие «Сохранить документ и запустить проверку»; при повторе после ошибки не создаёт дубликат документа. |
+| `/reviews` | «История проверок» | Сохранённые проверки; фильтры по ID документа и признаку экспертной проверки; пагинация; «Открыть результат»; «Скачать CSV». |
+| `/reviews/:reviewId` | «Результат проверки» | Метаданные и `FinalReview`, исходный документ, техническое примечание при наличии, служебный `review_json`, «Скачать результат CSV». |
+| `/audit` | «Журнал аудита» | Фильтр «Все записи» / «Успешно» / «Нужна экспертная проверка» / «Только ошибки», данные аудита и CSV. |
+| `*` | «Страница не найдена» | Русскоязычная 404-страница с возвратом на главную. |
 
-CSV export (`/reviews/export`, `/reviews/{review_id}/export`, `/audit-runs/export`) is not in this table because it never writes an `audit_runs` row — see the transaction boundaries table above.
+Frontend не реализует отдельный список документов, фильтр документов по `status` или
+отдельную карточку документа. Исходный документ показывается только на странице
+результата через `GET /api/documents/{document_id}`. Backend-эндпоинты списка и детали
+документа при этом остаются частью публичного API.
 
-### Reproducibility version literals
+## Транзакционные границы
 
-Every AI-invoking audit snapshot (`document.review` and `ai.review`) records these application constants inside `input_json` or `output_json` (not as database columns), together with the configured model name:
+| Операция | Правило |
+| --- | --- |
+| `document.create` | `Document` и `AuditRun` фиксируются атомарно. |
+| Успешная сохранённая проверка | `Review`, `Document.status="reviewed"` и аудит со статусом `success` или `needs_review` фиксируются атомарно. |
+| Сохранённый fallback | `Review.error`, `Document.status="review_failed"` и `AuditRun(status="error")` фиксируются атомарно; API возвращает `201`. |
+| Пригодный `Review` сохранить нельзя | Основная транзакция откатывается; отдельная recovery-транзакция по возможности меняет статус документа и пишет аудит ошибки, затем исходное исключение пробрасывается дальше. |
+| `ai.review` | Обычный или fallback-аудит фиксируется до HTTP-ответа. |
+| CSV-экспорт | Доступен только для чтения; audit не создаётся ни при успехе, ни при ошибке. |
 
-```text
-prompt_version = "spec-review-prompt-v2"
-review_schema_version = "spec-review-schema-v1"
+Recovery-транзакция — гарантия по возможности. Если база повторно отклоняет recovery
+write/commit, её изменения полностью откатываются: статус документа остаётся прежним,
+новый аудит отсутствует, а вызывающая сторона всё равно получает исходную ошибку.
+
+## Матрица исходов проверки документа
+
+| Исход | `Review.error` | `AuditRun.status` | `AuditRun.error` | `Document.status` |
+| --- | --- | --- | --- | --- |
+| `needs_review=false`, технического сбоя нет | `null` | `success` | `null` | `reviewed` |
+| `needs_review=true`, технического сбоя нет | `null` | `needs_review` | `null` | `reviewed` |
+| `used_fallback=true`, основная транзакция успешна | фиксированное очищенное сообщение | `error` | то же сообщение | `review_failed` |
+| Пригодный `Review` отсутствует, recovery успешна | строки `Review` нет | `error` | фиксированное очищенное сообщение | `review_failed` |
+| Пригодный `Review` отсутствует, recovery неуспешна | строки `Review` нет | новой записи нет | не применимо | прежний статус |
+
+`needs_review=true` сам по себе не означает техническую ошибку. Технический fallback
+определяется только по `used_fallback`.
+
+## Production-развёртывание
+
+Реальное развёртывание работает по адресу <https://spec-review.elivcloud.org>:
+
+```mermaid
+flowchart LR
+  Internet --> Traefik["Traefik v3.6"]
+  Traefik --> TLS["HTTPS / Let's Encrypt"]
+  TLS --> Auth["Infrastructure Basic Auth"]
+  Auth --> Caddy["Caddy frontend container"]
+  Caddy -->|"/api"| FastAPI["FastAPI backend container"]
+  FastAPI --> Volume[("app_data / SQLite")]
 ```
 
-Later prompt or schema changes require a new version literal. Previous version strings must not be silently reused after a material prompt or schema change.
+- Traefik подключает только `frontend` к внешней сети и направляет трафик на порт `80`
+  Caddy.
+- Caddy раздаёт SPA, выполняет fallback на `index.html` и проксирует `/api` на
+  `backend:8000`.
+- Backend не публикует порт хоста.
+- `/app/data` подключён к именованному volume `app_data`; сохранность SQLite проверена
+  после принудительного пересоздания backend-контейнера.
+- HTTPS и сертификат обслуживает существующий Traefik/Let's Encrypt.
+- Basic Auth реализована существующим Traefik middleware через
+  `TRAEFIK_MIDDLEWARES`; credentials и hash находятся вне репозитория.
 
-Duration is measured in milliseconds for the audited operation.
+Прикладной аутентификации в приложении нет. Инфраструктурная Basic Auth защищает
+развёртывание, но не создаёт пользователей, роли, сессии или изоляцию арендаторов и не
+меняет границы продукта.
 
-## Security boundaries
+## Границы безопасности и исключения
 
-- No authentication in the MVP; the app is intended for local or trusted-network use.
-- CORS is restricted to configured origins (for example the Vite dev server).
-- `OPENAI_API_KEY` and similar secrets live only in environment / `.env` (never committed; `.env.example` holds empty placeholders).
-- Audit logs must not contain API keys, authorization headers, tokens, provider credentials, or stack traces containing secrets.
-- Input is plain text only; no file upload pipeline for PDF/DOCX/OCR.
-- Backend validation is the trust boundary for review correctness; LLM output is untrusted until schema + QC pass.
+- CORS ограничен настроенными origin'ами.
+- `.env` и секреты не добавляются в Git и не копируются в образы.
+- Вход — только обычный текст; обработка PDF/DOCX/OCR отсутствует.
+- Backend-схема и QC — граница доверия для LLM-результата.
+- Вне границ остаются прикладная аутентификация и роли, RAG/векторные базы данных,
+  сравнение версий, переписывание спецификаций, интеграции с мессенджерами, совместная
+  работа нескольких пользователей, микросервисы, Redis, очереди, Kubernetes и
+  LegalTech-позиционирование.
 
-## Non-goals
-
-Explicitly out of scope for this architecture:
-
-- authentication, roles, and multi-tenant isolation;
-- PDF, DOCX, and OCR ingestion;
-- RAG, embeddings, and vector databases;
-- document version comparison;
-- generation of a rewritten specification;
-- messaging integrations;
-- multi-user collaboration;
-- microservices, Redis, message queues, Kubernetes;
-- LegalTech / contract-review positioning;
-- mandatory production cloud deployment as part of the local MVP.
-
-## Optional deployment architecture
-
-Production deployment is **optional** and occurs only after local MVP acceptance.
-
-When deployed temporarily:
-
-- same modular monolith images via Docker Compose;
-- FastAPI and frontend behind a temporary subdomain;
-- SQLite volume mounted for persistence;
-- environment variables supplied at runtime;
-- no requirement for Kubernetes, managed queues, or additional cloud AI services beyond the existing OpenAI API dependency.
-
-Local acceptance remains the primary delivery target.
+Обязательной частью исходных границ был локальный MVP. Production-развёртывание было
+необязательным следующим шагом и впоследствии было реализовано и проверено.

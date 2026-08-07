@@ -1,75 +1,102 @@
-# API Contracts
+# API-контракты
 
-All timestamps are canonical UTC ISO 8601 strings with a trailing `Z` (for example `2026-08-04T18:30:00Z`).
-All resource identifiers are UUID strings.
-Request and response bodies use JSON unless noted.
+Все временные метки — канонические строки UTC ISO 8601 с завершающим `Z`, например
+`2026-08-04T18:30:00Z`. Все идентификаторы ресурсов — строки UUID. Тела запросов и
+ответов используют JSON, кроме явно обозначенных CSV-ответов.
 
-Common error envelope (unless an endpoint specifies otherwise):
+Обычная error envelope:
 
 ```json
 {
-  "detail": "Human-readable error message"
+  "detail": "Понятное сообщение об ошибке"
 }
 ```
 
-Validation errors (HTTP `422`) may use FastAPI/Pydantic detail arrays.
+HTTP `422` от FastAPI/Pydantic может содержать массив `detail`.
 
-### Validation rules (deterministic)
+## Общие правила валидации
 
-- Missing, invalid, blank-after-trim, or incorrectly typed request fields → HTTP `422`.
-- Invalid UUID path or query values → HTTP `422`.
-- HTTP `400` is not used for these cases and is not an implementation choice versus `422`.
+- отсутствующее, невалидное, пустое после trim или неверно типизированное обязательное
+  поле возвращает HTTP `422`;
+- невалидный UUID в параметре пути или запроса возвращает `422`;
+- для этих случаев API не использует `400`;
+- непредвиденная необработанная ошибка возвращает `500` с очищенным сообщением без
+  подробностей исключения.
 
-### Pagination (all list endpoints)
+## Пагинация list endpoint'ов
 
-| Parameter | Default | Minimum | Maximum |
+| Параметр | По умолчанию | Минимум | Максимум |
 | --- | --- | --- | --- |
 | `limit` | `50` | `1` | `100` |
-| `offset` | `0` | `0` | none |
+| `offset` | `0` | `0` | нет |
 
-Ordering for every list endpoint: `created_at DESC`, then `id DESC` as a deterministic tie-breaker.
-
-Values outside the allowed ranges, or incorrectly typed pagination parameters, return HTTP `422`.
+Сортировка: `created_at DESC`, затем `id DESC` как детерминированный tie-breaker.
 
 ```text
-total = number of records matching all active filters before limit and offset are applied
+total = число строк после всех фильтров, но до limit и offset
 ```
 
-`total` is **not** the total unfiltered table size and **not** the number of items on the current page.
+`total` не равен размеру текущей страницы и не обязан равняться размеру таблицы без
+фильтров. Выход за допустимые границы и неверный тип дают `422`.
 
-The three CSV `/export` endpoints (see "CSV export conventions" below) are a deliberate exception: they accept the same *filters* as their list/detail counterpart but do not accept or use `limit`/`offset` — every matching row is exported in one response.
+CSV endpoint'ы не принимают `limit`/`offset` и экспортируют все строки по активным
+фильтрам.
 
-### Reason codes field naming
+## Имена reason codes
 
-- SQLite column name: `reason_codes_json` (JSON text array). See [DATA_MODEL.md](DATA_MODEL.md).
-- API response field name in all JSON review payloads (create/list/detail and standalone AI): `reason_codes` — a native JSON array.
-- The API serializes `reason_codes_json` as `reason_codes`. Clients never see the column name `reason_codes_json`.
-- The CSV export endpoints (below) are not JSON and use their own localized column named "Причины экспертной проверки" (Russian reason-code labels, not the raw `reason_codes` values) — see "CSV export conventions".
+- SQLite-колонка: `reason_codes_json`, текст JSON с массивом.
+- JSON API: `reason_codes`, обычный массив JSON.
+- Внутри `FinalReview`: `review_reason_codes`.
+- CSV показывает русские подписи в колонке «Причины экспертной проверки», а не исходные
+  значения enum.
 
-### CSV export conventions (all `/export` endpoints)
+Клиент JSON API никогда не получает имя `reason_codes_json`.
 
-Three read-only CSV export endpoints exist: `GET /api/reviews/export`, `GET /api/reviews/{review_id}/export`, `GET /api/audit-runs/export`. They share one format and one set of safety rules instead of each endpoint restating them:
+## Общий CSV-контракт
 
-- **Encoding:** UTF-8 with a BOM (`UTF-8-SIG`) — required for the file to open with correct Cyrillic text in Excel.
-- **Delimiter:** `;` (semicolon) — opens correctly by default in a Russian-locale Excel.
-- **Line endings:** `\r\n` (standard CSV).
-- **Content-Type:** `text/csv; charset=utf-8`. The published OpenAPI schema documents `text/csv` (not `application/json`) as the `200` response's content type for all three endpoints — every documented `422` error response is still `application/json`, unchanged.
-- **Content-Disposition:** `attachment; filename="..."` with a static, ASCII, backend-chosen literal filename (`reviews-export.csv`, `audit-runs-export.csv`, `review-{review_id}.csv`) — never a document title or other user-supplied text.
-- **No pagination:** `limit`/`offset` are not accepted parameters. Every row matching the active filters is exported in one response; ordering matches the equivalent list endpoint (`created_at DESC`, then `id DESC`).
-- **Empty result:** `200` with the UTF-8 BOM and the header row only — no data rows, never a `404`.
-- **Formula/CSV injection protection (CWE-1236):** any string cell whose first significant character — the first character after skipping any leading ordinary spaces (`" "`) — is `= + - @` or a tab/carriage-return/line-feed is prefixed with a leading `'` before being written (prepended to the original value unchanged, leading spaces included), so Excel/LibreOffice/Sheets read it back as literal text instead of evaluating it as a formula. A cell already starting with `'` is left unchanged (idempotent — sanitization never doubles the apostrophe). A plain `/` is never a trigger character. This applies to every user- or model-derived text value that reaches a cell — document title, `error`, JSON detail cells, etc. — and only ever changes the CSV representation, never the underlying stored value.
-- **Not audited:** like the other read-only list/detail endpoints, exporting does not write an `audit_runs` row, on success or failure.
-- **Filters:** each export endpoint accepts exactly the same filters as its non-export counterpart (see each section below); no new filter combinations or invariants are introduced by exporting.
+Доступны три эндпоинта только для чтения:
+
+- `GET /api/reviews/export`;
+- `GET /api/reviews/{review_id}/export`;
+- `GET /api/audit-runs/export`.
+
+Общие правила:
+
+- кодировка: UTF-8 с BOM (`UTF-8-SIG`);
+- разделитель: `;`;
+- окончания строк: `\r\n`;
+- runtime `Content-Type`: `text/csv; charset=utf-8`; в OpenAPI `200` документирован как
+  `text/csv`, а ответ об ошибке валидации `422` остаётся `application/json`;
+- `Content-Disposition`: `attachment` со статическим ASCII-именем файла:
+  `reviews-export.csv`, `audit-runs-export.csv` или `review-{review_id}.csv`;
+- переданный пользователем `title` никогда не используется как имя файла;
+- пагинации нет, сортировка совпадает с соответствующим list endpoint;
+- пустая выборка возвращает `200`, BOM и только строку заголовков;
+- экспорт не вызывает LLM, не меняет состояние предметной области и не создаёт
+  `audit_runs` ни при
+  успехе, ни при ошибке.
+
+### Защита от formula injection
+
+Для каждой строковой ячейки определяется первый значимый символ после пропуска только
+обычных ASCII-пробелов (`" "`). Если это `=`, `+`, `-`, `@`, табуляция, возврат каретки
+или перевод строки, к исходному значению целиком добавляется ведущий апостроф `'`.
+Пробелы и управляющий символ не удаляются. Значение, уже начинающееся с `'`, не изменяется
+повторно. Символ `/` не является trigger.
+
+Защита применяется ко всем текстовым значениям пользователя и модели, включая название
+документа, `error` и ячейку с деталями JSON, и меняет только CSV-представление, а не
+значение в SQLite.
 
 ---
 
-## GET /api/health
+## `GET /api/health`
 
-**Purpose:** Liveness check for the backend process.
+Проверяет доступность FastAPI-процесса.
 
-**Request parameters / body:** None.
+Параметров и тела нет.
 
-**Success response:** `200`
+Успех — `200`:
 
 ```json
 {
@@ -77,80 +104,80 @@ Three read-only CSV export endpoints exist: `GET /api/reviews/export`, `GET /api
 }
 ```
 
-**Errors:**
-
-| Code | When |
-| --- | --- |
-| 500 | Unexpected server failure |
-
-**Audit action name:** none (not audited).
-
-**Creates domain record:** no.
+Операция не создаёт domain records и не журналируется.
 
 ---
 
-## POST /api/documents
+## `POST /api/documents`
 
-**Purpose:** Create a document from plain text.
+Создаёт plain-text документ.
 
-**Request body:**
+Тело запроса:
 
 ```json
 {
-  "title": "string",
-  "text": "string"
+  "title": "Требования к уведомлениям",
+  "text": "Полный текст документа"
 }
 ```
 
-| Field | Required | Rules |
+| Поле | Обязательно | Правило |
 | --- | --- | --- |
-| `title` | yes | non-empty string after trim |
-| `text` | yes | non-empty string after trim |
+| `title` | да | String, непустая после trim. |
+| `text` | да | String, непустая после trim. |
 
-**Success response:** `201`
+Успех — `201`:
 
 ```json
 {
   "id": "uuid",
   "created_at": "2026-08-04T18:30:00Z",
-  "title": "string",
-  "text": "string",
+  "title": "Требования к уведомлениям",
+  "text": "Полный текст документа",
   "status": "created"
 }
 ```
 
-Document row and audit row are committed atomically. Audit: `action=document.create`, `entity_type="document"`, `entity_id=<created document id>`, `status="success"`, `error=null`.
+`Document` и `AuditRun` фиксируются атомарно. Данные аудита:
 
-**Errors:**
+```json
+{
+  "action": "document.create",
+  "entity_type": "document",
+  "entity_id": "uuid",
+  "input_json": {
+    "title_length": 25,
+    "text_length": 22
+  },
+  "output_json": {
+    "document_id": "uuid",
+    "status": "created"
+  },
+  "status": "success",
+  "error": null
+}
+```
 
-| Code | When |
+| Код | Причина |
 | --- | --- |
-| 422 | Missing, invalid, blank-after-trim, or incorrectly typed fields |
-| 500 | Unexpected server failure (must not be reported as success if the required audit row cannot be stored) |
+| `422` | Отсутствующие, пустые, неверно типизированные поля. |
+| `500` | Непредвиденный сбой, включая невозможность сохранить обязательный аудит. |
 
-**Audit action name:** `document.create`
-
-**Creates domain record:** yes — `documents` row. Also creates `audit_runs` row.
+Создаёт строки `documents` и `audit_runs`.
 
 ---
 
-## GET /api/documents
+## `GET /api/documents`
 
-**Purpose:** List documents with optional filters and pagination.
+Возвращает документы с фильтром и пагинацией.
 
-**Query parameters:**
-
-| Name | Type | Required | Description |
+| Параметр запроса | Тип | Обязательно | Описание |
 | --- | --- | --- | --- |
-| `status` | string enum | no | `created` \| `reviewed` \| `review_failed` |
-| `limit` | integer | no | Default `50`; minimum `1`; maximum `100` |
-| `offset` | integer | no | Default `0`; minimum `0` |
+| `status` | enum | нет | `created` \| `reviewed` \| `review_failed` |
+| `limit` | integer | нет | `1..100`, по умолчанию `50` |
+| `offset` | integer | нет | `>= 0`, по умолчанию `0` |
 
-Ordering: `created_at DESC`, then `id DESC`.
-
-`total` is the number of documents matching all active filters before `limit` and `offset` are applied.
-
-**Success response:** `200`
+Успех — `200`:
 
 ```json
 {
@@ -158,179 +185,171 @@ Ordering: `created_at DESC`, then `id DESC`.
     {
       "id": "uuid",
       "created_at": "2026-08-04T18:30:00Z",
-      "title": "string",
-      "text": "string",
+      "title": "Требования к уведомлениям",
+      "text": "Полный текст документа",
       "status": "created"
     }
   ],
-  "total": 0,
+  "total": 1,
   "limit": 50,
   "offset": 0
 }
 ```
 
-**Errors:**
-
-| Code | When |
-| --- | --- |
-| 422 | Invalid query parameter types/values, including out-of-range `limit`/`offset` or invalid `status` |
-| 500 | Unexpected server failure |
-
-**Audit action name:** none (read-only list; not audited).
-
-**Creates domain record:** no.
+Невалидные значения параметров запроса дают `422`; непредвиденный сбой — `500`.
+Эндпоинт предназначен только для чтения и не создаёт записи аудита или предметной области.
 
 ---
 
-## GET /api/documents/{document_id}
+## `GET /api/documents/{document_id}`
 
-**Purpose:** Fetch a single document by id.
+Возвращает документ по UUID. Успешный `200` имеет форму одного элемента из списка.
 
-**Path parameters:**
-
-| Name | Type | Required |
-| --- | --- | --- |
-| `document_id` | uuid string | yes |
-
-**Success response:** `200`
-
-```json
-{
-  "id": "uuid",
-  "created_at": "2026-08-04T18:30:00Z",
-  "title": "string",
-  "text": "string",
-  "status": "created"
-}
-```
-
-**Errors:**
-
-| Code | When |
+| Код | Причина |
 | --- | --- |
-| 404 | Document not found |
-| 422 | `document_id` is not a valid UUID |
-| 500 | Unexpected server failure |
+| `404` | Документ не найден. |
+| `422` | `document_id` не является UUID. |
+| `500` | Непредвиденный сбой. |
 
-**Audit action name:** none (read-only; not audited).
-
-**Creates domain record:** no.
+Эндпоинт предназначен только для чтения и не создаёт записи аудита или предметной области.
 
 ---
 
-## POST /api/documents/{document_id}/review
+## `POST /api/documents/{document_id}/review`
 
-**Purpose:** Run the full review pipeline for an existing document and persist the result.
+Запускает полный конвейер для сохранённого документа и сохраняет результат. Параметр
+пути `document_id` — обязательный UUID. Тела запроса нет.
 
-**Path parameters:**
-
-| Name | Type | Required |
-| --- | --- | --- |
-| `document_id` | uuid string | yes |
-
-**Request body:** none.
-
-**Success response:** `201`
+Успех — `201`:
 
 ```json
 {
   "id": "uuid",
   "created_at": "2026-08-04T18:30:00Z",
   "document_id": "uuid",
-  "review_json": { },
-  "confidence": "low",
+  "review_json": {
+    "summary": "Краткое заключение",
+    "risks": [],
+    "missing_requirements": [],
+    "contradictions": [],
+    "questions_to_client": [],
+    "acceptance_criteria": ["Если выполнено условие, когда происходит действие, то получен измеримый результат."],
+    "confidence": "medium",
+    "document_readiness": "needs_clarification",
+    "needs_review": false,
+    "review_reason_codes": []
+  },
+  "confidence": "medium",
   "readiness": "needs_clarification",
-  "needs_review": true,
-  "reason_codes": ["LOW_CONFIDENCE"],
+  "needs_review": false,
+  "reason_codes": [],
   "error": null
 }
 ```
 
-`review_json` is a backend-produced **`FinalReview`** object as defined in [REVIEW_SCHEMA.md](REVIEW_SCHEMA.md). It includes backend-written `needs_review` and `review_reason_codes`. It does **not** include `model_needs_review`.
+`review_json` — полный `FinalReview` из [REVIEW_SCHEMA.md](REVIEW_SCHEMA.md).
+`model_needs_review` не возвращается.
 
-Top-level denormalized response fields:
-
-| Response field | Source |
+| Top-level поле | Источник |
 | --- | --- |
 | `confidence` | `review_json.confidence` |
 | `readiness` | `review_json.document_readiness` |
-| `needs_review` | `review_json.needs_review` (final backend value) |
-| `reason_codes` | `review_json.review_reason_codes` (API serialization of column `reason_codes_json`) |
+| `needs_review` | `review_json.needs_review` |
+| `reason_codes` | `review_json.review_reason_codes` |
 
-`model_needs_review` is never exposed in persisted review responses, list responses, detail responses, standalone AI responses, or CSV exports.
+### Матрица персистентности и статусов
 
-### Persistence and status outcomes
+| Исход | `Review.error` | `AuditRun.status` | `AuditRun.error` | `Document.status` | HTTP |
+| --- | --- | --- | --- | --- | --- |
+| Валидный результат, `needs_review=false` | `null` | `success` | `null` | `reviewed` | `201` |
+| Валидный результат, `needs_review=true` | `null` | `needs_review` | `null` | `reviewed` | `201` |
+| `used_fallback=true`, основная транзакция зафиксирована | непустое фиксированное очищенное сообщение | `error` | то же сообщение | `review_failed` | `201` |
+| Пригодный `Review` не создан, recovery committed | строки нет | `error` | непустое фиксированное сообщение | `review_failed` | `500` |
+| Пригодный `Review` не создан, recovery тоже неуспешна | строки нет | новой строки нет | не применимо | прежний статус | `500` |
 
-- **Parsed `ModelReviewDraft` result (no technical failure):** commit review row, set document `status=reviewed`, and write audit atomically. Return `201` with the review payload. Review `error=null`. A result requiring human attention (deterministic codes and/or `model_needs_review=true`) uses audit `status="needs_review"` and audit `error=null`; a result that needs no human attention uses audit `status="success"` and audit `error=null`. Either way `document.status="reviewed"` — `needs_review` reflects the *content* of a completed review, it is never a technical failure signal on its own.
-- **Persisted safe `FinalReview` fallback (technical failure, safely contained):** commit review row, set document `status="review_failed"`, and write audit atomically. Return `201` with the review payload — never a `5xx`/`502` for this case. Review `needs_review=true` and review `error` is a non-empty sanitized, fixed business-facing message — it never names the closed `LLMErrorCategory` value, which is instead recorded separately as technical metadata in `AuditRun.output_json.llm_error_category`; audit `status="error"` with the same non-empty sanitized `error`.
-- **No usable review can be stored (unexpected failure, no review row at all):** roll back the failed main review transaction (no partial `Review` row survives); attempt a separate, **best-effort** recovery transaction that sets `document.status="review_failed"` and writes the error audit row with `entity_type="document"`, `entity_id=<document id>`, `status="error"`, and a non-empty sanitized `error`. Return HTTP `500` (or the concrete failure status if the document was not found — `404`) either way, carrying the original workflow failure — never the recovery transaction's own failure, if it has one.
+Для отсутствующего документа эндпоинт возвращает `404`; первоначальный `404` не вызывает LLM и
+не создаёт аудит. Если документ удалён между первоначальным чтением и write-
+транзакцией, также возвращается `404`, основная транзакция откатывается и аудит не
+создаётся.
 
-  - **Recovery transaction succeeds:** `document.status="review_failed"` and exactly one error `AuditRun` (as above) are durably committed.
-  - **Recovery transaction itself also fails** (for example, a repeat database outage at recovery time): its commit is rolled back in full — no partial `document.status` change and no partial/duplicate `AuditRun` row are left behind. `documents.status` can remain at whatever it was *before* this review attempt (for example `created`, or `reviewed` from an earlier successful review of the same document), and no error audit row exists for this particular attempt. The HTTP response still reports the *original* main-workflow failure (`500`, or `404` for a missing document) — the recovery transaction's own failure is never surfaced to the caller and never replaces it. Persisting the recovery `document.status`/error-audit pair is **best-effort, not a guarantee**, once the database itself is unavailable or otherwise rejects the recovery write.
+Сохранённый fallback — технический сбой, безопасно локализованный backend. Он содержит
+пригодный `FinalReview`, поэтому возвращает `201`, но не считается `reviewed`.
+Фиксированное сообщение для пользователя:
 
-`review_failed` covers both a persisted safe fallback and a review attempt that failed before any review row was persisted — either way, the automated pipeline did not complete a trustworthy review. A later attempt updates the document's status again: `reviewed` on a genuine success, `review_failed` again on another fallback or failure (subject to the best-effort caveat above when the *recovery* transaction itself fails).
+```text
+Проверку не удалось выполнить автоматически. Результат требует экспертной проверки.
+```
 
-The best-effort caveat applies **only** to the "no usable review" recovery path above. It never weakens the guarantee for a persisted technical fallback whose own (main) transaction commits successfully: that case unconditionally has a persisted `Review` row, a non-null `Review.error`, an error `AuditRun`, `document.status="review_failed"`, and HTTP `201` — see the row above.
+Конкретная категория не включается в это сообщение и хранится только в
+`AuditRun.output_json.llm_error_category`.
 
-Full outcome matrix for a document-backed review attempt (contract reconciliation, task "Contract reconciliation for persisted fallback"):
+`needs_review=true` сам по себе техническим сбоем не является. Единственный надёжный
+признак fallback внутри прикладного процесса — `used_fallback`.
 
-| Outcome | `Review.error` | `AuditRun.status` | `AuditRun.error` | `Document.status` |
-| --- | --- | --- | --- | --- |
-| Success (`needs_review=false`) | `null` | `success` | `null` | `reviewed` |
-| Success requiring manual review (`needs_review=true`, no technical failure) | `null` | `needs_review` | `null` | `reviewed` |
-| Technical fallback (`used_fallback=true`, main transaction commits) | non-null sanitized summary | `error` | non-null sanitized summary | `review_failed` |
-| No usable review (recovery transaction succeeds) | no `Review` row | `error` | non-null sanitized summary | `review_failed` |
-| No usable review (recovery transaction also fails — best-effort, not guaranteed) | no `Review` row | no new `AuditRun` row for this attempt | n/a | unchanged from before this attempt |
+### Граница recovery
 
-`needs_review=true` alone never indicates a technical failure — only `used_fallback` (the orchestrator's own typed outcome) does. A low-`confidence` or `not_ready` review that was successfully parsed and validated is still a `success`-technically-complete outcome and may use either `success` or `needs_review` audit status, never `error`.
+Если orchestration, QC, проверка результата или основная персистентность неожиданно
+завершаются ошибкой, основная транзакция полностью откатывается. Затем отдельная
+recovery-транзакция пытается
+атомарно выставить `Document.status="review_failed"` и создать один
+`AuditRun(status="error", entity_type="document")`.
 
-Preferred MVP behaviour for model/JSON/schema failure is always to persist the safe fallback and return `201` when persistence succeeds. Do not surface upstream failures as HTTP `502` when a safe fallback can be returned.
+Recovery выполняется по возможности. При её собственном сбое оба recovery-изменения
+откатываются; ошибка recovery не подменяет исходное исключение. Поэтому в этом крайнем
+случае статус может остаться `created`, `reviewed` или `review_failed` от предыдущей
+попытки, а аудит текущей попытки отсутствует.
 
-### Audit for this endpoint
+### Данные аудита
 
-Every `document.review` audit snapshot records `prompt_version="spec-review-prompt-v2"`, `review_schema_version="spec-review-schema-v1"`, and the configured model name inside `input_json` or `output_json`.
+Для сохранённого результата:
 
-| Outcome | Audit `status` | Audit `error` | `entity_type` / `entity_id` |
-| --- | --- | --- | --- |
-| Validated `ModelReviewDraft` → `FinalReview`, final `needs_review=false` | `success` | `null` | `review` / created review id |
-| Validated `ModelReviewDraft` → `FinalReview`, final `needs_review=true` (deterministic codes and/or `model_needs_review=true`) | `needs_review` | `null` | `review` / created review id |
-| Safe `FinalReview` fallback persisted | `error` | non-empty sanitized summary | `review` / created review id |
-| Failure before a review exists | `error` (best-effort: only if the recovery transaction itself succeeds) | non-empty sanitized summary (same caveat) | `document` / document id |
+```json
+{
+  "action": "document.review",
+  "entity_type": "review",
+  "entity_id": "review-uuid",
+  "input_json": {
+    "document_id": "document-uuid",
+    "prompt_version": "spec-review-prompt-v2",
+    "review_schema_version": "spec-review-schema-v1"
+  },
+  "output_json": {
+    "review_id": "review-uuid",
+    "used_fallback": false,
+    "llm_error_category": null
+  }
+}
+```
 
-**Errors:**
+Recovery-аудит использует `entity_type="document"`, `entity_id=document_id`, тот же
+`input_json` и `output_json=null`. Полный document text, `review_json` и имя модели в
+аудит этой операции не записываются.
 
-| Code | When |
+| Код | Причина |
 | --- | --- |
-| 404 | Document not found |
-| 422 | Invalid `document_id` |
-| 500 | Unexpected server failure, or failure to persist a usable review / required audit |
+| `404` | Документ не найден. |
+| `422` | Невалидный `document_id`. |
+| `500` | Непредвиденный сбой или невозможность сохранить пригодный `Review`/обязательный аудит. |
 
-**Audit action name:** `document.review`
-
-**Creates domain record:** yes — `reviews` row when usable; updates `documents.status`; creates `audit_runs` row. For the "failure before a review exists" outcome, both the `documents.status` update and the `audit_runs` row are written by a **best-effort recovery transaction** and are only guaranteed when that recovery transaction itself commits successfully (see "Persistence and status outcomes" above).
+Создаёт `reviews`, обновляет `documents.status` и создаёт `audit_runs`, если основная
+транзакция успешно сохраняет результат. Гарантии recovery описаны выше.
 
 ---
 
-## GET /api/reviews
+## `GET /api/reviews`
 
-**Purpose:** List persisted reviews with filters and pagination.
+Возвращает сохранённые проверки.
 
-**Query parameters:**
-
-| Name | Type | Required | Description |
+| Параметр запроса | Тип | Обязательно | Описание |
 | --- | --- | --- | --- |
-| `document_id` | uuid string | no | Filter by parent document |
-| `needs_review` | boolean | no | Filter by final `needs_review` |
-| `confidence` | string enum | no | `high` \| `medium` \| `low` |
-| `readiness` | string enum | no | `ready` \| `needs_clarification` \| `not_ready` |
-| `limit` | integer | no | Default `50`; minimum `1`; maximum `100` |
-| `offset` | integer | no | Default `0`; minimum `0` |
+| `document_id` | UUID | нет | Фильтр по документу. |
+| `needs_review` | boolean | нет | Фильтр по итоговому backend-флагу. |
+| `confidence` | enum | нет | `high` \| `medium` \| `low` |
+| `readiness` | enum | нет | `ready` \| `needs_clarification` \| `not_ready` |
+| `limit` | integer | нет | `1..100`, по умолчанию `50` |
+| `offset` | integer | нет | `>= 0`, по умолчанию `0` |
 
-Ordering: `created_at DESC`, then `id DESC`.
-
-`total` is the number of reviews matching all active filters before `limit` and `offset` are applied.
-
-**Success response:** `200`
+Успех — `200`:
 
 ```json
 {
@@ -339,239 +358,215 @@ Ordering: `created_at DESC`, then `id DESC`.
       "id": "uuid",
       "created_at": "2026-08-04T18:30:00Z",
       "document_id": "uuid",
-      "review_json": { },
+      "review_json": {},
       "confidence": "low",
       "readiness": "not_ready",
       "needs_review": true,
-      "reason_codes": [
-        "LOW_CONFIDENCE",
-        "TOO_VAGUE_INPUT"
-      ],
+      "reason_codes": ["LOW_CONFIDENCE", "TOO_VAGUE_INPUT"],
       "error": null
     }
   ],
-  "total": 0,
+  "total": 1,
   "limit": 50,
   "offset": 0
 }
 ```
 
-`review_json` is always a `FinalReview`. `model_needs_review` is never present.
+В реальном ответе `review_json` — полный валидный `FinalReview`; `{}` здесь только
+сокращает иллюстрацию list envelope. `model_needs_review` отсутствует.
 
-**Errors:**
-
-| Code | When |
-| --- | --- |
-| 422 | Invalid query parameter types/values, including invalid UUID `document_id` or out-of-range pagination |
-| 500 | Unexpected server failure |
-
-**Audit action name:** none (read-only list; not audited).
-
-**Creates domain record:** no.
+Невалидные фильтры, UUID и пагинация дают `422`; непредвиденный сбой — `500`.
+Эндпоинт предназначен только для чтения и не создаёт аудит.
 
 ---
 
-## GET /api/reviews/export
+## `GET /api/reviews/export`
 
-**Purpose:** Export every persisted review matching the given filters as CSV. See "CSV export conventions" above for encoding/delimiter/formula-injection rules shared by all `/export` endpoints.
+Экспортирует все проверки по фильтрам `document_id`, `needs_review`, `confidence`,
+`readiness`. `limit` и `offset` не принимаются. Static route зарегистрирован перед
+`/{review_id}`. Успех — `200` и:
 
-Registered before `/{review_id}` in the router so this static path is never shadowed by the dynamic review-id route.
+```text
+Content-Disposition: attachment; filename="reviews-export.csv"
+```
 
-**Query parameters:** identical to `GET /api/reviews` (`document_id`, `needs_review`, `confidence`, `readiness`) — `limit`/`offset` are not accepted.
+Колонки:
 
-Ordering: `created_at DESC`, then `id DESC` — same as `GET /api/reviews`.
-
-**Success response:** `200`, `Content-Disposition: attachment; filename="reviews-export.csv"`.
-
-CSV columns (semicolon-delimited, Russian headers, localized display values — raw enum
-values are never published in these columns; `app/services/display_labels.py` is the
-single source for every mapping below and is shared by all three `/export` endpoints):
-
-| Column | Source | Display value |
-| --- | --- | --- |
-| ID проверки | `review.id` | raw UUID string |
-| ID документа | `review.document_id` | raw UUID string |
-| Название документа | parent `document.title` (via a single JOIN — no N+1 query) | raw string |
-| Дата проверки | `review.created_at` | localized Moscow-time `ДД.ММ.ГГГГ, ЧЧ:ММ` (`format_datetime_ru`) |
-| Нужна экспертная проверка | `review.needs_review` | `Да` / `Нет` (`label_bool_yes_no`) |
-| Уверенность анализа | `review.confidence` | `high`→`Высокая`, `medium`→`Средняя`, `low`→`Низкая` (`label_confidence`) |
-| Статус готовности | `review.readiness` | `ready`→`Готов`, `needs_clarification`→`Требует уточнений`, `not_ready`→`Не готов` (`label_readiness`) |
-| Причины экспертной проверки | `review.reason_codes` | Russian reason-code labels joined with `\|`, in catalogue order (`label_reason_codes`) |
-| Ошибка | `review.error`, or empty string when `null` | fixed sanitized business-facing message — never the raw `LLMErrorCategory` value (see "Persistence and status outcomes" above) |
-
-An unrecognized future enum value falls back to the raw value unchanged instead of
-raising — the same policy the frontend's own `utils/labels.ts` mappings use.
-
-The full `review_json` is intentionally not included in this list export (would make the CSV unreadable) — use `GET /api/reviews/{review_id}/export` for a single review's complete data.
-
-**Errors:**
-
-| Code | When |
+| Колонка | Источник и отображение |
 | --- | --- |
-| 422 | Invalid query parameter types/values, including invalid UUID `document_id` |
-| 500 | Unexpected server failure |
+| ID проверки | `review.id`, UUID без локализации |
+| ID документа | `review.document_id`, UUID без локализации |
+| Название документа | `document.title`, загружается одним JOIN |
+| Дата проверки | `created_at` → московское время `ДД.ММ.ГГГГ, ЧЧ:ММ` |
+| Нужна экспертная проверка | `Да` / `Нет` |
+| Уверенность анализа | `high`→`Высокая`, `medium`→`Средняя`, `low`→`Низкая` |
+| Статус готовности | `ready`→`Готов`, `needs_clarification`→`Требует уточнений`, `not_ready`→`Не готов` |
+| Причины экспертной проверки | Русские подписи через `\|` в порядке каталога |
+| Ошибка | Очищенный `review.error` или пустая строка |
 
-**Audit action name:** none (read-only; not audited).
+Нераспознанное значение enum отображается без локализации, а не вызывает ошибку. Полный
+`review_json` намеренно отсутствует; для него используется подробный export.
 
-**Creates domain record:** no.
+Невалидные фильтры дают `422`; непредвиденный сбой — `500`. Эндпоинт предназначен
+только для чтения и не создаёт аудит.
 
 ---
 
-## GET /api/reviews/{review_id}
+## `GET /api/reviews/{review_id}`
 
-**Purpose:** Fetch a single persisted review.
+Возвращает одну сохранённую проверку в форме элемента списка. `review_json` —
+`FinalReview`, поле `reason_codes` — обычный массив, `model_needs_review` отсутствует.
 
-**Path parameters:**
-
-| Name | Type | Required |
-| --- | --- | --- |
-| `review_id` | uuid string | yes |
-
-**Success response:** `200` — same review object shape as list items (includes `reason_codes`; `review_json` is `FinalReview`; no `model_needs_review`).
-
-**Errors:**
-
-| Code | When |
+| Код | Причина |
 | --- | --- |
-| 404 | Review not found |
-| 422 | Invalid `review_id` |
-| 500 | Unexpected server failure |
+| `404` | Проверка не найдена. |
+| `422` | `review_id` не является UUID. |
+| `500` | Непредвиденный сбой. |
 
-**Audit action name:** none (read-only; not audited).
-
-**Creates domain record:** no.
+Эндпоинт предназначен только для чтения и не создаёт аудит.
 
 ---
 
-## GET /api/reviews/{review_id}/export
+## `GET /api/reviews/{review_id}/export`
 
-**Purpose:** Export one review's full detail as a human-readable two-column CSV (`Поле` / `Значение`). See "CSV export conventions" above.
+Возвращает подробный двухколоночный CSV «Поле» / «Значение».
 
-> **Note (contract history):** an earlier draft of this document specified a JSON export at this same path, gated on an audited `review.export` action; it was never implemented (`backend/README.md` listed it under "not yet built"). This CSV contract supersedes that draft entirely — it is not audited, matching every other read-only detail endpoint.
+Успех — `200`:
 
-**Path parameters:**
+```text
+Content-Disposition: attachment; filename="review-{review_id}.csv"
+```
 
-| Name | Type | Required |
-| --- | --- | --- |
-| `review_id` | uuid string | yes |
-
-**Success response:** `200`, `Content-Disposition: attachment; filename="review-{review_id}.csv"`.
-
-Two columns, one row per field. Same localized display values as `GET /api/reviews/export`
-above (`app/services/display_labels.py`) for every field except the last, which stays raw
-technical JSON:
-
-| Поле | Значение (source → display) |
+| Поле | Значение |
 | --- | --- |
-| ID проверки | `review.id` — raw UUID string |
-| ID документа | `review.document_id` — raw UUID string |
-| Название документа | parent `document.title`, or empty string if the document is unavailable — raw string |
-| Дата проверки | `review.created_at` — localized Moscow-time `ДД.ММ.ГГГГ, ЧЧ:ММ` (`format_datetime_ru`) |
-| Нужна экспертная проверка | `review.needs_review` — `Да` / `Нет` (`label_bool_yes_no`) |
-| Уверенность анализа | `review.confidence` — `high`→`Высокая`, `medium`→`Средняя`, `low`→`Низкая` (`label_confidence`) |
-| Статус готовности | `review.readiness` — `ready`→`Готов`, `needs_clarification`→`Требует уточнений`, `not_ready`→`Не готов` (`label_readiness`) |
-| Причины экспертной проверки | `review.reason_codes` — Russian reason-code labels joined with `\|`, in catalogue order (`label_reason_codes`) |
-| Ошибка | `review.error`, or empty string when `null` — fixed sanitized business-facing message, never the raw `LLMErrorCategory` value |
-| Полный результат JSON | the complete `FinalReview` (`review.review_json`), serialized as one deterministic JSON string (`ensure_ascii=false`, sorted keys) in a single cell — raw technical keys and enum values (e.g. `"confidence": "low"`), no data loss, `model_needs_review` never included |
+| ID проверки | `review.id`, UUID без локализации |
+| ID документа | `review.document_id`, UUID без локализации |
+| Название документа | `document.title` или пустая строка, если родительский документ недоступен |
+| Дата проверки | Московское время `ДД.ММ.ГГГГ, ЧЧ:ММ` |
+| Нужна экспертная проверка | `Да` / `Нет` |
+| Уверенность анализа | Локализованное значение `confidence` |
+| Статус готовности | Локализованное значение `readiness` |
+| Причины экспертной проверки | Русские подписи через `\|` |
+| Ошибка | Очищенный `review.error` или пустая строка |
+| Полный результат JSON | Полный `FinalReview` как одна детерминированная строка JSON с `ensure_ascii=false` и сортировкой ключей |
 
-**Errors:**
-
-| Code | When |
-| --- | --- |
-| 404 | Review not found |
-| 422 | Invalid `review_id` |
-| 500 | Unexpected server failure |
-
-**Audit action name:** none (read-only; not audited).
-
-**Creates domain record:** no.
+`model_needs_review` в полном JSON отсутствует. Невалидный UUID даёт `422`,
+неизвестная проверка — `404`, непредвиденный сбой — `500`. Эндпоинт предназначен
+только для чтения и не создаёт аудит.
 
 ---
 
-## POST /api/ai/review
+## `POST /api/ai/review`
 
-**Purpose:** Demonstrate the AI review operation on arbitrary text without creating document or review domain records.
+Проверяет произвольный текст без создания `Document` или `Review`.
 
-**Request body:**
+Тело запроса:
 
 ```json
 {
-  "title": "string",
-  "text": "string"
+  "title": "Модуль уведомлений",
+  "text": "Текст требований"
 }
 ```
 
-| Field | Required | Rules |
+| Поле | Обязательно | Правило |
 | --- | --- | --- |
-| `title` | no | optional label for audit context; may be omitted; if present and blank after trim → `422` |
-| `text` | yes | non-empty string after trim |
+| `title` | нет | Метка для аудита; поле можно опустить. Если передано, должно быть непустой после trim строкой. Явный JSON `null` запрещён. |
+| `text` | да | Непустая после trim string. |
 
-**Success response:** `200`
+Лишние поля запрещены (`extra="forbid"`).
+
+Успех — `200`:
 
 ```json
 {
-  "review_json": { },
-  "confidence": "low",
+  "review_json": {
+    "summary": "Краткое заключение",
+    "risks": [],
+    "missing_requirements": [],
+    "contradictions": [],
+    "questions_to_client": [],
+    "acceptance_criteria": ["Если выполнено условие, когда происходит действие, то получен измеримый результат."],
+    "confidence": "medium",
+    "document_readiness": "needs_clarification",
+    "needs_review": false,
+    "review_reason_codes": []
+  },
+  "confidence": "medium",
   "readiness": "needs_clarification",
-  "needs_review": true,
-  "reason_codes": ["LOW_CONFIDENCE"],
+  "needs_review": false,
+  "reason_codes": [],
   "error": null
 }
 ```
 
-Pipeline: input validation → OpenAI Structured Outputs (`ModelReviewDraft`) → Pydantic validation → deterministic QC producing `FinalReview` (or safe `FinalReview` fallback) → write audit → response.
+Последовательность: валидация → OpenAI Structured Outputs → `ModelReviewDraft` → Pydantic →
+детерминированный QC → `FinalReview` или безопасный fallback → фиксация аудита → ответ.
+`model_needs_review` не возвращается.
 
-The response body exposes a **`FinalReview`** (as `review_json` plus denormalized top-level fields), **not** the raw `ModelReviewDraft`. `model_needs_review` is never returned.
+При типизированном LLM-сбое endpoint возвращает `200` с безопасным `FinalReview`,
+`needs_review=true` и `error=null` в теле HTTP-ответа. Технический сбой отмечается не
+полем `error` ответа, а обязательным `AuditRun.status="error"` с фиксированным непустым
+`AuditRun.error`. Строки `documents` и `reviews` не создаются.
 
-`needs_review` and `reason_codes` are the **final backend** values. On model/JSON/schema failure, return the safe `FinalReview` fallback with `needs_review=true`. Preferred MVP behaviour is `200` + safe fallback; do not use HTTP `502` when a fallback can be returned.
+### Данные аудита
 
-The audit row is written **before** returning a successful or fallback response. Both `entity_type` and `entity_id` are null. Every `ai.review` audit snapshot records these application constants inside `input_json` or `output_json` (not as database columns), together with the configured model name:
-
-```text
-prompt_version = "spec-review-prompt-v2"
-review_schema_version = "spec-review-schema-v1"
+```json
+{
+  "action": "ai.review",
+  "entity_type": null,
+  "entity_id": null,
+  "input_json": {
+    "title_length": 20,
+    "text_length": 17,
+    "prompt_version": "spec-review-prompt-v2",
+    "review_schema_version": "spec-review-schema-v1",
+    "model": "configured-model-name"
+  },
+  "output_json": {
+    "used_fallback": false,
+    "llm_error_category": null,
+    "needs_review": false,
+    "review_reason_codes": []
+  }
+}
 ```
 
-Later prompt or schema changes require a new version literal. Previous version strings must not be silently reused after a material prompt or schema change.
+При опущенном `title` значение `title_length` равно `null`; пустое настроенное имя
+модели превращается в `model=null`. Полные `title`/`text` и `FinalReview` в аудит не
+попадают. Recovery-аудит при непредвиденном сбое сохраняет тот же `input_json`, но
+`output_json=null`.
 
-| Outcome | Audit `status` | Audit `error` |
+| Исход | `AuditRun.status` | `AuditRun.error` |
 | --- | --- | --- |
-| Validated `ModelReviewDraft` → `FinalReview`, final `needs_review=false` | `success` | `null` |
-| Validated `ModelReviewDraft` → `FinalReview`, final `needs_review=true` | `needs_review` | `null` |
-| Safe `FinalReview` fallback returned | `error` | non-empty sanitized summary |
+| Валидный результат, `needs_review=false` | `success` | `null` |
+| Валидный результат, `needs_review=true` | `needs_review` | `null` |
+| Безопасный fallback | `error` | непустое фиксированное очищенное сообщение |
 
-**Errors:**
-
-| Code | When |
+| Код | Причина |
 | --- | --- |
-| 422 | Missing, invalid, blank-after-trim, or incorrectly typed fields |
-| 500 | Unexpected server failure (including inability to store the required audit row) |
+| `422` | Невалидное тело, включая пустые `text`/`title`, явный `title:null` или лишнее поле. |
+| `500` | Непредвиденный сбой, включая невозможность сохранить обязательный аудит. |
 
-**Audit action name:** `ai.review`
-
-**Creates domain record:** **no** `documents` or `reviews` row. **Yes** — creates `audit_runs` row. `entity_type` and `entity_id` are both null.
+Создаёт только `audit_runs`.
 
 ---
 
-## GET /api/audit-runs
+## `GET /api/audit-runs`
 
-**Purpose:** List audit records with filters and pagination.
+Возвращает записи аудита.
 
-**Query parameters:**
-
-| Name | Type | Required | Description |
+| Параметр запроса | Тип | Обязательно | Описание |
 | --- | --- | --- | --- |
-| `status` | string enum | no | `success` \| `needs_review` \| `error` |
-| `action` | string | no | Exact audit action name (for example `document.review`) |
-| `errors_only` | boolean | no | When `true`, return rows where `status == "error"` only |
-| `limit` | integer | no | Default `50`; minimum `1`; maximum `100` |
-| `offset` | integer | no | Default `0`; minimum `0` |
+| `status` | enum | нет | `success` \| `needs_review` \| `error` |
+| `action` | string | нет | Точное имя операции; пустое после trim запрещено. |
+| `errors_only` | boolean | нет | При `true` только `status == "error"`; по умолчанию `false`. |
+| `limit` | integer | нет | `1..100`, по умолчанию `50` |
+| `offset` | integer | нет | `>= 0`, по умолчанию `0` |
 
-Ordering: `created_at DESC`, then `id DESC`.
+`status` и `errors_only` можно передать вместе; фильтры объединяются через `AND`.
 
-`total` is the number of audit runs matching all active filters before `limit` and `offset` are applied.
-
-**Success response:** `200`
+Успех — `200`:
 
 ```json
 {
@@ -582,127 +577,93 @@ Ordering: `created_at DESC`, then `id DESC`.
       "action": "document.review",
       "entity_type": "review",
       "entity_id": "uuid",
-      "input_json": { },
-      "output_json": { },
+      "input_json": {},
+      "output_json": {},
       "status": "needs_review",
       "error": null,
       "duration_ms": 1234
     }
   ],
-  "total": 0,
+  "total": 1,
   "limit": 50,
   "offset": 0
 }
 ```
 
-**Errors:**
-
-| Code | When |
-| --- | --- |
-| 422 | Invalid query parameter types/values, including out-of-range pagination or invalid `status` |
-| 500 | Unexpected server failure |
-
-**Audit action name:** none (listing audits is not audited).
-
-**Creates domain record:** no.
+Невалидные фильтры/пагинация и пустой `action` дают `422`; непредвиденный сбой —
+`500`. Эндпоинт предназначен только для чтения; чтение аудита не журналируется.
 
 ---
 
-## GET /api/audit-runs/export
+## `GET /api/audit-runs/export`
 
-**Purpose:** Export every audit run matching the given filters as CSV. See "CSV export conventions" above.
+Экспортирует все записи аудита по фильтрам `status`, `action`, `errors_only`, без
+пагинации. Комбинация `status` и `errors_only` допустима и использует `AND`. Статический
+маршрут зарегистрирован перед `/{audit_run_id}`.
 
-Registered before `/{audit_run_id}` in the router so this static path is never shadowed by the dynamic audit-run-id route.
+Успех — `200`:
 
-**Query parameters:** identical to `GET /api/audit-runs` (`status`, `action`, `errors_only`) — `limit`/`offset` are not accepted. The list endpoint does not forbid passing `status` and `errors_only` together (they simply combine as an `AND` of both filters, as documented under "Audit status meanings" below); the export endpoint follows the exact same behavior rather than inventing a new restriction.
+```text
+Content-Disposition: attachment; filename="audit-runs-export.csv"
+```
 
-Ordering: `created_at DESC`, then `id DESC` — same as `GET /api/audit-runs`.
-
-**Success response:** `200`, `Content-Disposition: attachment; filename="audit-runs-export.csv"`.
-
-CSV columns (semicolon-delimited, Russian headers, localized display values — raw enum
-values are never published in these columns; `app/services/display_labels.py` is the
-single source for every mapping below and is shared by all three `/export` endpoints):
-
-| Column | Source | Display value |
-| --- | --- | --- |
-| ID записи | `audit_run.id` | raw UUID string |
-| Операция | `audit_run.action` | `document.create`→`Создание документа`, `document.review`→`Проверка документа`, `ai.review`→`Проверка текста без сохранения` (`label_audit_action`) |
-| Тип объекта | `audit_run.entity_type`, or empty string when `null` | `document`→`Документ`, `review`→`Проверка` (`label_audit_entity_type`) |
-| ID объекта | `audit_run.entity_id`, or empty string when `null` | raw UUID string |
-| Статус | `audit_run.status` | `success`→`Успешно`, `needs_review`→`Нужна экспертная проверка`, `error`→`Техническая ошибка` (`label_audit_status`) |
-| Длительность | `audit_run.duration_ms` | `< 1000`ms stays milliseconds (`"14 мс"`); `>= 1000`ms switches to one-decimal seconds with a comma separator (`"37,0 с"`) (`format_duration_ru`) |
-| Ошибка | `audit_run.error`, or empty string when `null` | raw sanitized error text (technical failures use the same fixed business-facing message as `Review.error` — never the raw `LLMErrorCategory` value) |
-| Дата и время | `audit_run.created_at` | localized Moscow-time `ДД.ММ.ГГГГ, ЧЧ:ММ` (`format_datetime_ru`) |
-| Детали JSON | `{"input_json": ..., "output_json": ...}` — both fields combined into one deterministic JSON string (`ensure_ascii=false`, sorted keys) in a single cell | raw technical keys and enum values (e.g. `"llm_error_category": "PROVIDER_ERROR"`), unchanged |
-
-An unrecognized future enum value falls back to the raw value unchanged instead of
-raising — the same policy the frontend's own `utils/labels.ts` mappings use.
-
-**Errors:**
-
-| Code | When |
+| Колонка | Источник и отображение |
 | --- | --- |
-| 422 | Invalid query parameter types/values, including invalid `status` or an empty/whitespace-only `action` |
-| 500 | Unexpected server failure |
+| ID записи | `audit_run.id`, UUID без локализации |
+| Операция | `document.create`→`Создание документа`, `document.review`→`Проверка документа`, `ai.review`→`Проверка текста без сохранения` |
+| Тип объекта | `document`→`Документ`, `review`→`Проверка`, `null`→пусто |
+| ID объекта | UUID без локализации или пусто |
+| Статус | `success`→`Успешно`, `needs_review`→`Нужна экспертная проверка`, `error`→`Техническая ошибка` |
+| Длительность | `<1000` → `14 мс`; `>=1000` → `37,0 с` с одним десятичным знаком |
+| Ошибка | Очищенный `error` или пустая строка |
+| Дата и время | Московское время `ДД.ММ.ГГГГ, ЧЧ:ММ` |
+| Детали JSON | `{"input_json": ..., "output_json": ...}` как одна детерминированная строка JSON |
 
-**Audit action name:** none (read-only; not audited).
-
-**Creates domain record:** no.
+Нераспознанное значение enum/action/entity отображается без локализации.
+Невалидные фильтры и пустой `action` дают `422`; непредвиденный сбой — `500`.
+Эндпоинт предназначен только для чтения и не создаёт аудит.
 
 ---
 
-## GET /api/audit-runs/{audit_run_id}
+## `GET /api/audit-runs/{audit_run_id}`
 
-**Purpose:** Fetch a single audit run.
+Возвращает одну запись аудита в форме элемента списка.
 
-**Path parameters:**
-
-| Name | Type | Required |
-| --- | --- | --- |
-| `audit_run_id` | uuid string | yes |
-
-**Success response:** `200` — same object shape as list items.
-
-**Errors:**
-
-| Code | When |
+| Код | Причина |
 | --- | --- |
-| 404 | Audit run not found |
-| 422 | Invalid `audit_run_id` |
-| 500 | Unexpected server failure |
+| `404` | Запись аудита не найдена. |
+| `422` | `audit_run_id` не является UUID. |
+| `500` | Непредвиденный сбой. |
 
-**Audit action name:** none (read-only; not audited).
+Эндпоинт предназначен только для чтения; дополнительный аудит не создаётся.
 
-**Creates domain record:** no.
+## Каталог операций аудита
 
----
-
-## Audit action catalogue
-
-| Action | Endpoint | Domain records | Entity mapping |
+| Операция | Эндпоинт | Записи | Связь с сущностью |
 | --- | --- | --- | --- |
-| `document.create` | `POST /api/documents` | `documents` + `audit_runs` | `document` / created document id |
-| `document.review` | `POST /api/documents/{document_id}/review` | `reviews` (+ status update) when usable + `audit_runs` | `review` / review id when persisted; else `document` / document id |
-| `ai.review` | `POST /api/ai/review` | `audit_runs` only | both entity fields null |
+| `document.create` | `POST /api/documents` | `documents` + `audit_runs` | `document` / ID документа |
+| `document.review` | `POST /api/documents/{document_id}/review` | `reviews` + обновление статуса + `audit_runs`, если результат пригоден | `review` / ID проверки; при recovery `document` / ID документа |
+| `ai.review` | `POST /api/ai/review` | только `audit_runs` | `null` / `null` |
 
-The three CSV `/export` endpoints (`GET /api/reviews/export`, `GET /api/reviews/{review_id}/export`, `GET /api/audit-runs/export`) are read-only and intentionally **not** in this catalogue — like every other list/detail `GET`, they never write an `audit_runs` row.
+Проверка доступности, эндпоинты списка/детали и все CSV-экспорты не журналируются.
 
-### Audit status meanings
+## Значения статуса аудита
 
-| Status | Meaning |
+| Статус | Смысл |
 | --- | --- |
-| `success` | The action completed without a technical error and manual review is not required |
-| `needs_review` | The model response was successfully parsed and validated, but the final deterministic result requires manual review |
-| `error` | Model, transport, JSON parsing, schema validation, or persistence failure occurred, including cases where a safe fallback was returned or persisted |
+| `success` | Технического сбоя нет, экспертная проверка не нужна. |
+| `needs_review` | `ModelReviewDraft` успешно разобран и валидирован, но итоговый результат требует эксперта. |
+| `error` | Сбой модели, транспорта, JSON, схемы или персистентности, включая безопасный fallback. |
 
-Status / `error` field invariants:
+Инварианты:
 
-- when `audit_runs.status == "error"`, `audit_runs.error` must contain a non-empty sanitized error summary;
-- when `audit_runs.status` is `"success"` or `"needs_review"`, `audit_runs.error` must be `null`;
-- technical failures that return or persist a safe fallback still use `status="error"` with a non-null sanitized error summary;
-- successfully parsed and validated reviews requiring human attention use `status="needs_review"` and `error=null`.
+- `status="error"` требует непустой очищенный `error`;
+- `status="success"` и `status="needs_review"` требуют `error=null`;
+- `errors_only=true` означает ровно `status == "error"`, а не проверку nullable-поля;
+- строки, нарушающие инвариант, не считаются валидными.
 
-`errors_only=true` means only `status == "error"`. It is not defined as `status=error OR error is non-null`, because the invariants above make that redundant and inconsistent rows must not be treated as valid data.
+## Связанные контракты
 
-Health, read/list endpoints, and the CSV `/export` endpoints are not audited.
+- [Схема `ModelReviewDraft` / `FinalReview`](REVIEW_SCHEMA.md)
+- [Модель SQLite и точные снимки аудита](DATA_MODEL.md)
+- [Архитектура и транзакционные границы](ARCHITECTURE.md)

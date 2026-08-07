@@ -1,240 +1,282 @@
-# Data Model
+# Модель данных
 
-SQLite is the only datastore for the MVP. The schema contains exactly three tables: `documents`, `reviews`, and `audit_runs`.
+SQLite — единственное хранилище MVP. Схема содержит ровно три таблицы:
+`documents`, `reviews`, `audit_runs`. Идентификаторы хранятся как UUID-строки в
+`TEXT`, JSON-поля — как UTF-8-текст JSON.
 
-Identifiers are stored as UUID strings (`TEXT`). JSON columns store UTF-8 JSON text.
+## Требования к соединению
 
-## Connection requirements
-
-Every database connection must enable foreign-key enforcement:
+Каждое соединение включает внешние ключи:
 
 ```sql
 PRAGMA foreign_keys = ON
 ```
 
-## Timestamp storage rule
+## Временные метки
 
-Store every timestamp column as a **canonical UTC ISO 8601 string with a trailing `Z`** (example: `2026-08-04T18:30:00Z`).
-API responses must use the same UTC representation. No alternative storage formats are permitted for the approved MVP.
+Все колонки временных меток хранят канонические значения UTC ISO 8601 с завершающим `Z`, например
+`2026-08-04T18:30:00Z`. API возвращает тот же формат.
 
-## Enumerations
+## Значения enum
 
-### DocumentStatus
+### `DocumentStatus`
 
-| Value | Meaning |
+| Значение | Смысл |
 | --- | --- |
-| `created` | Document stored; no persisted review attempt yet |
-| `reviewed` | The latest document-backed review attempt completed technically successfully (a review row was persisted with `error=null`), regardless of whether its *content* sets `needs_review=true` |
-| `review_failed` | The latest document-backed review attempt did not complete a trustworthy automated review: either a safe fallback review row was persisted after a technical failure (`Review.error` non-null), or no usable review row could be persisted at all |
+| `created` | Документ сохранён; сохранённой попытки проверки ещё нет. |
+| `reviewed` | Последняя document-backed проверка завершилась технически успешно и сохранила `Review.error=null`, независимо от `needs_review`. |
+| `review_failed` | Последняя попытка не дала доверенной автоматической проверки: сохранён fallback с непустым `Review.error` либо пригодный `Review` сохранить не удалось. |
 
-Each new document-backed review attempt re-sets `documents.status` from its own outcome: `reviewed` after a genuine success, `review_failed` after a fallback or a failed attempt — never left at `created` once a review has been attempted. For the "no usable review row could be persisted at all" case, this update is written by a separate, **best-effort recovery transaction** (see "Transaction boundaries (persistence)" below): if that recovery transaction itself fails (for example, a repeat database outage), `documents.status` is left at whatever value it already had before this attempt, not guaranteed to become `review_failed`.
+Каждая новая попытка выставляет статус по собственному исходу. После успешной повторной
+проверки документ может перейти из `review_failed` в `reviewed`. Если не удалось
+сохранить пригодный `Review`, `review_failed` выставляет отдельная recovery-транзакция;
+при сбое самой recovery-транзакции прежний статус остаётся неизменным.
 
-### AuditStatus
+### `AuditStatus`
 
-| Value | Meaning |
+| Значение | Смысл |
 | --- | --- |
-| `success` | The action completed without a technical error and manual review is not required |
-| `needs_review` | The model response was successfully parsed and validated, but the final deterministic result requires manual review |
-| `error` | Model, transport, JSON parsing, schema validation, or persistence failure occurred, including cases where a safe fallback was returned or persisted |
+| `success` | Операция завершена без технической ошибки, экспертная проверка не нужна. |
+| `needs_review` | Ответ модели успешно разобран и валидирован, но итог требует экспертной проверки. |
+| `error` | Произошёл сбой модели, транспорта, JSON, схемы или персистентности, включая сохранённый/возвращённый fallback. |
 
-Status / `error` field invariants (application-level validation; not separate columns or tables):
+Инварианты application layer:
 
-- when `audit_runs.status == "error"`, `audit_runs.error` must contain a non-empty sanitized error summary;
-- when `audit_runs.status` is `"success"` or `"needs_review"`, `audit_runs.error` must be `null`;
-- technical failures that return or persist a safe fallback still use `status="error"` with a non-null sanitized error summary;
-- successfully parsed and validated reviews requiring human attention use `status="needs_review"` and `error=null`.
+- при `status == "error"` поле `error` — непустая очищенная строка;
+- при `status` равном `success` или `needs_review` поле `error` — `null`;
+- несогласованные строки не должны записываться или считаться валидными.
 
-Inconsistent rows that violate these invariants must not be treated as valid data. Raw credentials, headers, tokens, stack traces containing secrets, and provider credentials must never be stored.
+`confidence`, `document_readiness`, severity, category и reason codes проверки определены
+в [REVIEW_SCHEMA.md](REVIEW_SCHEMA.md).
 
-Confidence, document readiness, severity, categories, and review reason codes are defined in [REVIEW_SCHEMA.md](REVIEW_SCHEMA.md). `reviews.review_json` stores a backend-produced **`FinalReview`**. The untrusted OpenAI payload is a separate **`ModelReviewDraft`** and is not persisted in `review_json`.
+## Таблица `documents`
 
----
-
-## Table: `documents`
-
-| Column | Type | Required | Nullable | Description |
+| Колонка | Тип | Обязательна | Nullable | Описание |
 | --- | --- | --- | --- | --- |
-| `id` | `TEXT` (UUID) | yes | no | Primary key |
-| `created_at` | `TEXT` (UTC ISO 8601 with `Z`) | yes | no | Creation timestamp |
-| `title` | `TEXT` | yes | no | Document title |
-| `text` | `TEXT` | yes | no | Full plain-text body |
-| `status` | `TEXT` | yes | no | `DocumentStatus` value |
+| `id` | `TEXT` (UUID) | да | нет | Первичный ключ. |
+| `created_at` | `TEXT` | да | нет | UTC ISO 8601 с `Z`. |
+| `title` | `TEXT` | да | нет | Название документа. |
+| `text` | `TEXT` | да | нет | Полный plain-text документ. |
+| `status` | `TEXT` | да | нет | Значение `DocumentStatus`. |
 
-**Constraints:**
+Ограничения:
 
-- `PRIMARY KEY (id)`
-- `CHECK (status IN ('created', 'reviewed', 'review_failed'))`
-- `title` and `text` must be non-empty after trim at insert time (enforced in application validation → HTTP `422`)
+- `PRIMARY KEY (id)`;
+- `CHECK (status IN ('created', 'reviewed', 'review_failed'))`;
+- `title` и `text` должны быть непустыми после trim; это обеспечивает Pydantic до
+  записи и возвращает HTTP `422`.
 
-**Indexes:**
+Индексы:
 
-- `ix_documents_status` on `status`
-- `ix_documents_created_at` on `created_at`
+- `ix_documents_status` по `status`;
+- `ix_documents_created_at` по `created_at`.
 
-**Cascade behaviour:**
+Удаление документа каскадно удаляет его `reviews` через `ON DELETE CASCADE`.
+`audit_runs` не удаляются и могут после этого ссылаться на отсутствующую логическую сущность.
 
-- Deleting a document deletes its dependent `reviews` rows (`ON DELETE CASCADE` from `reviews.document_id`).
-- `audit_runs` are **not** cascaded from documents; audit rows are retained as an immutable operational log. `entity_id` may therefore reference a deleted entity.
+## Таблица `reviews`
 
----
-
-## Table: `reviews`
-
-| Column | Type | Required | Nullable | Description |
+| Колонка | Тип | Обязательна | Nullable | Описание |
 | --- | --- | --- | --- | --- |
-| `id` | `TEXT` (UUID) | yes | no | Primary key |
-| `created_at` | `TEXT` (UTC ISO 8601 with `Z`) | yes | no | Creation timestamp |
-| `document_id` | `TEXT` (UUID) | yes | no | FK → `documents.id` |
-| `review_json` | `TEXT` (JSON object) | yes | no | Full backend-produced `FinalReview` object |
-| `confidence` | `TEXT` | yes | no | Denormalized `high` \| `medium` \| `low` |
-| `readiness` | `TEXT` | yes | no | Denormalized `ready` \| `needs_clarification` \| `not_ready` |
-| `needs_review` | `INTEGER` (boolean 0/1) | yes | no | Final backend decision from `FinalReview.needs_review` |
-| `reason_codes_json` | `TEXT` (JSON array) | yes | no | Backend-produced `FinalReview.review_reason_codes` stored as JSON text |
-| `error` | `TEXT` | no | yes | Error message when the pipeline recorded a failure context; otherwise `NULL` |
+| `id` | `TEXT` (UUID) | да | нет | Первичный ключ. |
+| `created_at` | `TEXT` | да | нет | UTC ISO 8601 с `Z`. |
+| `document_id` | `TEXT` (UUID) | да | нет | FK → `documents.id`. |
+| `review_json` | `TEXT` (JSON object) | да | нет | Полный `FinalReview`, созданный backend. |
+| `confidence` | `TEXT` | да | нет | `high` \| `medium` \| `low`. |
+| `readiness` | `TEXT` | да | нет | `ready` \| `needs_clarification` \| `not_ready`. |
+| `needs_review` | `INTEGER` (0/1) | да | нет | Итоговое backend-решение. |
+| `reason_codes_json` | `TEXT` (JSON array) | да | нет | `FinalReview.review_reason_codes`. |
+| `error` | `TEXT` | нет | да | Фиксированное очищенное сообщение для сохранённого fallback; иначе `NULL`. |
 
-**Constraints:**
+Ограничения:
 
-- `PRIMARY KEY (id)`
-- `FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE`
-- `CHECK (confidence IN ('high', 'medium', 'low'))`
-- `CHECK (readiness IN ('ready', 'needs_clarification', 'not_ready'))`
-- `CHECK (needs_review IN (0, 1))`
+- `PRIMARY KEY (id)`;
+- `FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE`;
+- `CHECK (confidence IN ('high', 'medium', 'low'))`;
+- `CHECK (readiness IN ('ready', 'needs_clarification', 'not_ready'))`;
+- `CHECK (needs_review IN (0, 1))`.
 
-**Indexes:**
+Индексы: `ix_reviews_document_id`, `ix_reviews_needs_review`,
+`ix_reviews_confidence`, `ix_reviews_readiness`, `ix_reviews_created_at`.
 
-- `ix_reviews_document_id` on `document_id`
-- `ix_reviews_needs_review` on `needs_review`
-- `ix_reviews_confidence` on `confidence`
-- `ix_reviews_readiness` on `readiness`
-- `ix_reviews_created_at` on `created_at`
+Правила денормализации:
 
-**Cascade behaviour:**
-
-- Child of `documents` with `ON DELETE CASCADE`.
-- Does not own `audit_runs`.
-
-**Denormalization rules:**
-
-| Column | Must match |
+| Колонка | Должна совпадать с |
 | --- | --- |
 | `confidence` | `review_json.confidence` |
 | `readiness` | `review_json.document_readiness` |
-| `needs_review` | `review_json.needs_review` (backend-produced `FinalReview` value) |
-| `reason_codes_json` | `review_json.review_reason_codes` (backend-produced only) |
+| `needs_review` | `review_json.needs_review` |
+| `reason_codes_json` | `review_json.review_reason_codes` |
 
-`model_needs_review` is never stored in any `reviews` column.
+`model_needs_review` не хранится ни в одной review-колонке. API преобразует
+`reason_codes_json` в обычный массив JSON `reason_codes`; имя SQLite-колонки клиенту не
+передаётся. `review_json` всегда содержит `FinalReview`, никогда `ModelReviewDraft`.
 
-**API serialization:** the column `reason_codes_json` is exposed in all API responses as the native JSON array field `reason_codes`. Clients never receive the column name `reason_codes_json`. `review_json` is always a `FinalReview`; APIs never return a raw `ModelReviewDraft`.
+## Таблица `audit_runs`
 
----
-
-## Table: `audit_runs`
-
-| Column | Type | Required | Nullable | Description |
+| Колонка | Тип | Обязательна | Nullable | Описание |
 | --- | --- | --- | --- | --- |
-| `id` | `TEXT` (UUID) | yes | no | Primary key |
-| `created_at` | `TEXT` (UTC ISO 8601 with `Z`) | yes | no | Creation timestamp |
-| `action` | `TEXT` | yes | no | Action name (for example `document.review`) |
-| `entity_type` | `TEXT` | no | yes | Logical entity type (`document`, `review`); `NULL` when none |
-| `entity_id` | `TEXT` (UUID) | no | yes | Entity UUID; `NULL` when none |
-| `input_json` | `TEXT` (JSON) | no | yes | Sanitized input snapshot |
-| `output_json` | `TEXT` (JSON) | no | yes | Sanitized output snapshot |
-| `status` | `TEXT` | yes | no | `AuditStatus` value |
-| `error` | `TEXT` | no | yes | Sanitized error summary; non-empty when `status="error"`; must be `NULL` when `status` is `"success"` or `"needs_review"` |
-| `duration_ms` | `INTEGER` | yes | no | Operation duration in milliseconds; `>= 0` |
+| `id` | `TEXT` (UUID) | да | нет | Первичный ключ. |
+| `created_at` | `TEXT` | да | нет | UTC ISO 8601 с `Z`. |
+| `action` | `TEXT` | да | нет | Имя операции, например `document.review`. |
+| `entity_type` | `TEXT` | нет | да | `document`, `review` или `NULL`. |
+| `entity_id` | `TEXT` (UUID) | нет | да | UUID логической сущности или `NULL`. |
+| `input_json` | `TEXT` (JSON) | нет | да | Очищенный снимок входных данных. |
+| `output_json` | `TEXT` (JSON) | нет | да | Очищенный снимок результата. |
+| `status` | `TEXT` | да | нет | Значение `AuditStatus`. |
+| `error` | `TEXT` | нет | да | Очищенное сообщение; непустое только при `status="error"`. |
+| `duration_ms` | `INTEGER` | да | нет | Длительность операции, `>= 0`. |
 
-**Constraints:**
+Ограничения:
 
-- `PRIMARY KEY (id)`
-- `CHECK (status IN ('success', 'needs_review', 'error'))`
-- `CHECK (duration_ms >= 0)`
-- No foreign key to `documents` or `reviews` (audit log is independent)
+- `PRIMARY KEY (id)`;
+- `CHECK (status IN ('success', 'needs_review', 'error'))`;
+- `CHECK (duration_ms >= 0)`;
+- внешних ключей к domain tables нет.
 
-**Application-level validation rules** (enforced in application code; do not add a new table or column):
+Индексы: `ix_audit_runs_status`, `ix_audit_runs_action`,
+`ix_audit_runs_created_at`, составной `ix_audit_runs_entity` по
+`(entity_type, entity_id)`.
 
-- if `status == "error"` then `error` is a non-empty sanitized string;
-- if `status` is `"success"` or `"needs_review"` then `error` is `NULL`;
-- rows that violate these invariants are invalid and must not be written.
+Журнал аудита доступен только для добавления на уровне публичного API: эндпоинтов
+обновления и удаления нет.
 
-**Indexes:**
+### Связь с сущностями
 
-- `ix_audit_runs_status` on `status`
-- `ix_audit_runs_action` on `action`
-- `ix_audit_runs_created_at` on `created_at`
-- `ix_audit_runs_entity` on (`entity_type`, `entity_id`)
-
-**Cascade behaviour:**
-
-- None toward or from domain tables. Audit rows are append-only for the MVP (no update/delete API).
-
-### Entity mapping
-
-| Action | `entity_type` | `entity_id` |
+| Операция | `entity_type` | `entity_id` |
 | --- | --- | --- |
-| `document.create` | `document` | created document id |
-| `document.review` (successful or fallback-persisted) | `review` | created review id |
-| `document.review` (failure before a review exists) | `document` | document id |
+| `document.create` | `document` | ID созданного документа |
+| `document.review`, `Review` сохранён | `review` | ID созданной проверки |
+| `document.review`, `Review` не создан | `document` | ID документа |
 | `ai.review` | `NULL` | `NULL` |
 
-CSV export (`GET /api/reviews/export`, `GET /api/reviews/{review_id}/export`, `GET /api/audit-runs/export`) is not in this table because it is a read-only `GET` and never writes an `audit_runs` row.
+CSV-эндпоинты записи аудита не создают.
 
-### AI-invoking reproducibility metadata
+### Точная структура данных аудита
 
-Every AI-invoking audit snapshot (`document.review` and `ai.review`) records these application constants inside `input_json` or `output_json`, together with the configured model name. They are **not** database columns:
+Реализация намеренно не пишет в снимки аудита полные `title`, текст документа,
+`review_json` или сырое содержимое ответа модели.
 
-```text
-prompt_version = "spec-review-prompt-v2"
-review_schema_version = "spec-review-schema-v1"
+#### `document.create`
+
+```json
+{
+  "input_json": {
+    "title_length": 24,
+    "text_length": 850
+  },
+  "output_json": {
+    "document_id": "uuid",
+    "status": "created"
+  }
+}
 ```
 
-Later prompt or schema changes require a new version literal. Previous version strings must not be silently reused after a material prompt or schema change.
+#### `document.review` — сохранённый успех или fallback
 
----
+```json
+{
+  "input_json": {
+    "document_id": "uuid",
+    "prompt_version": "spec-review-prompt-v2",
+    "review_schema_version": "spec-review-schema-v1"
+  },
+  "output_json": {
+    "review_id": "uuid",
+    "used_fallback": false,
+    "llm_error_category": null
+  }
+}
+```
 
-## Foreign-key relationship
+При fallback `used_fallback=true`, а `llm_error_category` содержит одно из значений
+`LLMErrorCategory`. Аудит этой операции не содержит полного `FinalReview`,
+`review_reason_codes`, текста документа или настроенного имени модели.
 
-- `reviews.document_id` → `documents.id` (`ON DELETE CASCADE`), enforced only when `PRAGMA foreign_keys = ON`
-- `audit_runs` has no FK relationships
+#### `document.review` — recovery после непредвиденного сбоя
 
-One document may have multiple reviews over time. The MVP does not add a separate “latest review” table; the application may select the latest by `created_at DESC`, then `id DESC`, when needed.
+`input_json` содержит `document_id`, `prompt_version`, `review_schema_version` в той же
+форме; `output_json=null`. `entity_type="document"`, `entity_id` равен ID документа.
 
-## Transaction boundaries (persistence)
+#### `ai.review` — обычный или fallback ответ
 
-| Scenario | Rule |
+```json
+{
+  "input_json": {
+    "title_length": 24,
+    "text_length": 850,
+    "prompt_version": "spec-review-prompt-v2",
+    "review_schema_version": "spec-review-schema-v1",
+    "model": "configured-model-name"
+  },
+  "output_json": {
+    "used_fallback": false,
+    "llm_error_category": null,
+    "needs_review": false,
+    "review_reason_codes": []
+  }
+}
+```
+
+Если `title` опущен, `title_length=null`. Если имя модели пусто, `model=null`. При
+fallback меняются флаги, категория и reason codes, но полный текст и `FinalReview` не
+добавляются.
+
+#### `ai.review` — recovery после непредвиденного сбоя
+
+`input_json` имеет ту же структуру с длинами/version/model, `output_json=null`, оба
+entity-поля равны `NULL`.
+
+В `error` всегда записывается только одно из фиксированных русских сообщений для
+пользователя, а не `str(exc)`, трассировка или ответ провайдера.
+
+## Связи
+
+- `reviews.document_id` → `documents.id` с `ON DELETE CASCADE`;
+- `audit_runs` не имеет FK;
+- у одного документа может быть несколько проверок;
+- отдельной таблицы «последней проверки» нет; при необходимости используется
+  `created_at DESC`, затем `id DESC`.
+
+## Транзакционные границы
+
+| Сценарий | Правило |
 | --- | --- |
-| `document.create` | Document and audit row committed atomically |
-| Successful document-backed review | Review row, document status `reviewed`, and audit row committed atomically |
-| Persisted safe fallback | Fallback review (`Review.error` non-null), document status `review_failed`, and error audit row (`audit_runs.error` non-null) committed atomically. This is the main persistence transaction succeeding — not the recovery path below — so it carries no best-effort caveat: a successfully committed fallback unconditionally has all three. |
-| No usable review can be stored | Roll back the failed main persistence transaction first — this atomically discards any partially-prepared `Document`/`Review`/`AuditRun` changes from that attempt, so no partial state from it survives. Then attempt a separate **recovery transaction** that tries to set `document.status="review_failed"` and write one error `AuditRun` row. This recovery write is **best-effort**, not guaranteed — if the recovery transaction's own commit also fails (for example, the database is itself unavailable), its changes are rolled back in full — no partial `Document.status` update and no partial/duplicate `AuditRun` row are left behind — and `documents.status` simply keeps whatever value it already had before this attempt (`created`, or `reviewed`/`review_failed` from an earlier attempt on the same document), with no new `AuditRun` row for this attempt. |
-| Required audit cannot be stored | Audited action must not be reported as successful |
+| `document.create` | `Document` и аудит фиксируются атомарно. |
+| Успешный `document.review` | `Review`, `Document.status="reviewed"` и аудит фиксируются атомарно. |
+| Сохранённый fallback | `Review.error`, `Document.status="review_failed"` и аудит ошибки фиксируются атомарно. |
+| Пригодный `Review` сохранить нельзя | Основная транзакция полностью откатывается; отдельная recovery-транзакция пытается атомарно обновить статус и создать аудит ошибки. |
+| Фиксация recovery неуспешна | Оба recovery-изменения откатываются; прежний статус остаётся, новой записи аудита нет, исходная ошибка сохраняется. |
+| Обязательный аудит не сохраняется | Операция не возвращается как успешная. |
 
-The best-effort caveat above applies only to the recovery transaction in the "no usable review can be stored" row. It does not weaken any other row in this table: `document.create`, a successful document-backed review, and a persisted safe fallback are each still committed atomically as their own single (non-recovery) transaction, with no best-effort qualifier.
+Оговорка «по возможности» относится только к recovery после отсутствия пригодного
+`Review`; она не ослабляет атомарность создания документа, обычной проверки или
+сохранённого fallback.
 
-## JSON serialization rules
+## JSON-сериализация
 
-1. JSON columns (`review_json`, `reason_codes_json`, `input_json`, `output_json`) store compact UTF-8 JSON text.
-2. Objects and arrays must be valid JSON; never store Python/`None` literals or trailing commas.
-3. Booleans in JSON are `true` / `false`; SQLite `needs_review` uses `0` / `1`.
-4. `reason_codes_json` is always a JSON array (possibly empty `[]`), never a bare string.
-5. `review_json` must satisfy the `FinalReview` schema in [REVIEW_SCHEMA.md](REVIEW_SCHEMA.md) when a review row is persisted, including safe fallbacks. It must never store a raw `ModelReviewDraft`.
-6. `null` JSON values are allowed only where the review schema permits (`evidence` on risks may be `null`).
-7. API responses parse these columns back to native JSON objects/arrays; clients never receive double-encoded JSON strings for object fields.
-8. API field name for reason codes is always `reason_codes`; only the SQLite column is named `reason_codes_json`.
-9. `reason_codes_json` stores backend-produced `FinalReview.review_reason_codes` only; the model never supplies reason codes.
+1. `review_json`, `reason_codes_json`, `input_json`, `output_json` содержат валидный
+   компактный UTF-8 JSON.
+2. Логические значения JSON — `true`/`false`; SQLite `needs_review` — `0`/`1`.
+3. `reason_codes_json` всегда массив, включая `[]`.
+4. `review_json` проходит схему `FinalReview`; необработанный `ModelReviewDraft` не сохраняется.
+5. JSON `null` допустим только там, где это позволяет контракт; например,
+   `risks[].evidence` может быть `null`.
+6. API десериализует JSON-колонки в обычные объекты/массивы и не возвращает строки JSON
+   с двойным кодированием.
 
-## Data that must never be written to audit logs
+## Данные, запрещённые в журнале аудита
 
-Audit `input_json` / `output_json` / `error` must **never** contain:
+В `input_json`, `output_json` и `error` нельзя записывать:
 
-- API keys, tokens, passwords, or `.env` secret values;
-- `Authorization` or cookie header values;
-- private TLS material or connection strings that embed credentials;
-- full raw upstream provider credentials or signing secrets;
-- stack traces containing secrets.
+- ключи API, токены, пароли и значения секретных переменных;
+- `Authorization` и cookie headers;
+- закрытые материалы TLS и строки соединения с учётными данными;
+- полные title/text документов;
+- полный `review_json`, необработанный ответ модели/провайдера;
+- сообщение исключения и трассировку.
 
-Document title/text and review payloads are allowed in audit snapshots for operational diagnosis, subject to the local/trusted-network MVP threat model. Do not add extra PII redaction tables in this schema.
-
-## ER diagram
+## ER-диаграмма
 
 ```mermaid
 erDiagram
@@ -271,4 +313,4 @@ erDiagram
   }
 ```
 
-No other tables are part of the approved MVP data model.
+Других таблиц в утверждённой модели данных нет.
