@@ -1,5 +1,7 @@
 # AI Specification Review & Risk Assistant
 
+[![CI](https://github.com/eliv1982/ai-spec-review-risk-assistant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/eliv1982/ai-spec-review-risk-assistant/actions/workflows/ci.yml)
+
 Веб-приложение для проверки технических заданий, проектных и бизнес-требований,
 feature request'ов и брифов на автоматизацию. Сервис выявляет риски, пробелы и
 противоречия, формирует вопросы и измеримые критерии приёмки, а затем применяет
