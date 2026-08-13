@@ -19,9 +19,14 @@ function jsonErrorResponse(body: unknown, status: number): Response {
   });
 }
 
-/** jsdom's `Blob` polyfill has no `.text()`/`.arrayBuffer()` — read it via
- * `FileReader` instead, the same way any real browser environment can. */
+/** Node's fetch can return a Blob from a different realm than jsdom's global
+ * Blob. Prefer the Blob's own reader when available; older jsdom Blobs need
+ * FileReader instead. */
 function readBlobAsText(blob: Blob): Promise<string> {
+  if (typeof blob.text === "function") {
+    return blob.text();
+  }
+
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -87,7 +92,7 @@ describe("exportAuditRunsCsv", () => {
     expect(String(url)).toBe(`${ORIGIN}/api/audit-runs/export`);
   });
 
-  it("возвращает Blob и извлекает filename из Content-Disposition", async () => {
+  it("возвращает CSV Blob и извлекает filename из Content-Disposition", async () => {
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValueOnce(
       csvResponse("a;b\r\n1;2\r\n", {
@@ -96,8 +101,8 @@ describe("exportAuditRunsCsv", () => {
     );
 
     const result = await exportAuditRunsCsv({});
-    expect(result.blob).toBeInstanceOf(Blob);
     expect(await readBlobAsText(result.blob)).toBe("a;b\r\n1;2\r\n");
+    expect(result.blob.type.toLowerCase().replace(/\s/g, "")).toBe("text/csv;charset=utf-8");
     expect(result.filename).toBe("audit-runs-export.csv");
   });
 
