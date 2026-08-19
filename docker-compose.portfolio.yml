@@ -1,0 +1,38 @@
+# Final steady-state overlay: adds the public static landing page as a
+# separate service, routed by Traefik on PUBLIC_HOST with no auth middleware.
+# Intended to be combined with the existing production stack, e.g.:
+#
+#   docker compose --env-file .env \
+#     -f docker-compose.yml -f docker-compose.traefik.yml \
+#     -f docker-compose.traefik-auth.yml -f docker-compose.portfolio.yml \
+#     up -d --build
+#
+# At that point APP_HOST is expected to already point at the private
+# application hostname; this file does not change APP_HOST itself.
+services:
+  landing:
+    build:
+      context: ./landing
+    restart: unless-stopped
+    networks:
+      - traefik
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "${TRAEFIK_NETWORK:-traefik}"
+      traefik.http.routers.ai-spec-review-landing.rule: "Host(`${PUBLIC_HOST:?PUBLIC_HOST is required}`)"
+      traefik.http.routers.ai-spec-review-landing.entrypoints: "${TRAEFIK_ENTRYPOINT:-websecure}"
+      traefik.http.routers.ai-spec-review-landing.tls: "true"
+      traefik.http.routers.ai-spec-review-landing.tls.certresolver: "${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      traefik.http.routers.ai-spec-review-landing.service: "ai-spec-review-landing"
+      traefik.http.services.ai-spec-review-landing.loadbalancer.server.port: "80"
+
+networks:
+  traefik:
+    external: true
+    name: "${TRAEFIK_NETWORK:-traefik}"

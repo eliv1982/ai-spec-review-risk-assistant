@@ -1,0 +1,25 @@
+# TEMPORARY migration Stage-1 overlay ONLY.
+#
+# Adds a second authenticated Traefik router (bound to the SAME existing
+# `ai-spec-review` Traefik service/frontend container) so the current
+# frontend is reachable at both the current APP_HOST and a new
+# APP_ALIAS_HOST during the migration window. It does not build, duplicate,
+# or otherwise change the frontend service itself, and it does not touch
+# networks or volumes.
+#
+# The existing `ai-spec-review` router (docker-compose.traefik.yml /
+# docker-compose.traefik-auth.yml) is left completely untouched by this file.
+#
+# MUST NOT be included in the final steady-state deployment once APP_HOST
+# itself has been switched to the private hostname (i.e. once
+# docker-compose.portfolio.yml is adopted for the public landing). Remove
+# this file's `-f` reference from the deploy command at that point.
+services:
+  frontend:
+    labels:
+      traefik.http.routers.ai-spec-review-app-alias.rule: "Host(`${APP_ALIAS_HOST:?APP_ALIAS_HOST is required}`)"
+      traefik.http.routers.ai-spec-review-app-alias.entrypoints: "${TRAEFIK_ENTRYPOINT:-websecure}"
+      traefik.http.routers.ai-spec-review-app-alias.tls: "true"
+      traefik.http.routers.ai-spec-review-app-alias.tls.certresolver: "${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      traefik.http.routers.ai-spec-review-app-alias.middlewares: "${TRAEFIK_MIDDLEWARES:?TRAEFIK_MIDDLEWARES is required}"
+      traefik.http.routers.ai-spec-review-app-alias.service: "ai-spec-review"

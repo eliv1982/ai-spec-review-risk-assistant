@@ -1,0 +1,21 @@
+:80 {
+	encode zstd gzip
+
+	# Static site only: no reverse_proxy directive exists in this file, so this
+	# container is structurally incapable of reaching the FastAPI backend.
+	route {
+		@api path /api /api/*
+		respond @api 404
+
+		root * /srv
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+	}
+}

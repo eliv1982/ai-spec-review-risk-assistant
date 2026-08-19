@@ -68,3 +68,92 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  landing:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build landing image
+        run: docker build -t ai-spec-review-landing:ci ./landing
+
+      - name: Start landing container
+        run: docker run -d --name landing-ci -p 127.0.0.1:8099:80 ai-spec-review-landing:ci
+
+      - name: Wait for landing container to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8099/ > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Landing container did not become ready in time" >&2
+          exit 1
+
+      - name: Verify landing responses
+        run: |
+          set -euo pipefail
+
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/)
+          if [ "$status" != "200" ]; then
+            echo "expected / to return 200, got $status" >&2
+            exit 1
+          fi
+
+          html=$(curl -s http://127.0.0.1:8099/)
+          echo "$html" | grep -Fq 'https://github.com/eliv1982/ai-spec-review-risk-assistant'
+          echo "$html" | grep -Fq 'app.spec-review.elivcloud.org'
+
+          api_status=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/api)
+          if [ "$api_status" != "404" ]; then
+            echo "expected /api to return 404, got $api_status" >&2
+            exit 1
+          fi
+
+          health_status=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/api/health)
+          if [ "$health_status" != "404" ]; then
+            echo "expected /api/health to return 404, got $health_status" >&2
+            exit 1
+          fi
+
+      - name: Stop landing container
+        if: always()
+        run: docker rm -f landing-ci
+
+      - name: Write dummy environment file for Compose validation
+        run: |
+          cat > /tmp/ci-dummy.env <<'EOF'
+          OPENAI_API_KEY=dummy
+          OPENAI_MODEL=dummy-model
+          DATABASE_URL=sqlite:///./data/app.db
+          BACKEND_CORS_ORIGINS=http://localhost:5173
+          APP_PORT=8080
+          APP_HOST=ci-app-host.invalid
+          APP_ALIAS_HOST=ci-app-alias-host.invalid
+          PUBLIC_HOST=ci-public-host.invalid
+          TRAEFIK_NETWORK=traefik
+          TRAEFIK_ENTRYPOINT=websecure
+          TRAEFIK_CERTRESOLVER=letsencrypt
+          TRAEFIK_MIDDLEWARES=dummy-auth@file
+          EOF
+
+      - name: Validate Stage-1 private-alias Compose merge
+        run: >
+          docker compose --env-file /tmp/ci-dummy.env
+          -f docker-compose.yml
+          -f docker-compose.traefik.yml
+          -f docker-compose.traefik-auth.yml
+          -f docker-compose.private-alias.yml
+          config -q
+
+      - name: Validate final portfolio Compose merge
+        run: >
+          docker compose --env-file /tmp/ci-dummy.env
+          -f docker-compose.yml
+          -f docker-compose.traefik.yml
+          -f docker-compose.traefik-auth.yml
+          -f docker-compose.portfolio.yml
+          config -q

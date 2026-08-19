@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Specification Review &amp; Risk Assistant</title>
+<meta name="description" content="ИИ-рецензент технических и бизнес-требований с детерминированным контролем качества.">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Перейти к содержимому</a>
+
+<header class="hero">
+  <div class="container">
+    <p class="eyebrow">Инженерный портфолио-проект</p>
+    <h1>AI Specification Review &amp; Risk Assistant</h1>
+    <p class="subtitle">ИИ-рецензент технических и бизнес-требований с детерминированным контролем качества.</p>
+  </div>
+</header>
+
+<main id="main">
+  <div class="container">
+
+    <section class="section" aria-labelledby="flow-heading">
+      <h2 id="flow-heading">Как это устроено</h2>
+      <p>
+        Модель формирует структурированный черновик проверки через LLM Structured
+        Outputs, затем детерминированный QC проверяет черновик по фиксированным
+        правилам без повторного обращения к модели, а результат сохраняется в
+        историю проверок и журнал аудита.
+      </p>
+      <p class="flow">
+        <span>LLM Structured Outputs</span>
+        <span class="arrow" aria-hidden="true">→</span>
+        <span>Детерминированный QC</span>
+        <span class="arrow" aria-hidden="true">→</span>
+        <span>История проверок и аудита</span>
+      </p>
+    </section>
+
+    <section class="section" aria-labelledby="capabilities-heading">
+      <h2 id="capabilities-heading">Возможности</h2>
+      <ul class="capabilities">
+        <li>
+          <span class="cap-name">Structured Outputs</span>
+          <span class="cap-desc">строгая JSON-схема ответа модели</span>
+        </li>
+        <li>
+          <span class="cap-name">Детерминированный QC</span>
+          <span class="cap-desc">проверка качества по фиксированным правилам</span>
+        </li>
+        <li>
+          <span class="cap-name">Safe fallback</span>
+          <span class="cap-desc">предсказуемое поведение при сбое LLM</span>
+        </li>
+        <li>
+          <span class="cap-name">Журнал аудита</span>
+          <span class="cap-desc">история статусов и решений по проверкам</span>
+        </li>
+        <li>
+          <span class="cap-name">CSV export</span>
+          <span class="cap-desc">выгрузка проверок и аудита</span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="section" aria-labelledby="about-heading">
+      <h2 id="about-heading">Об инженерной практике</h2>
+      <ul class="about-list">
+        <li>Production-развертывание за HTTPS.</li>
+        <li>Приватный экземпляр приложения — доступ только для авторизованных пользователей.</li>
+        <li>Human-led, AI-assisted engineering: решения и ревью — за человеком, ИИ — инструмент.</li>
+      </ul>
+    </section>
+
+    <section class="section" aria-labelledby="links-heading">
+      <h2 id="links-heading">Ссылки</h2>
+      <div class="links">
+        <a class="button" href="https://github.com/eliv1982/ai-spec-review-risk-assistant">
+          Исходный код на GitHub
+        </a>
+        <div class="link-group">
+          <a class="button button-secondary" href="https://app.spec-review.elivcloud.org/">
+            Приватное приложение
+          </a>
+          <p class="link-note">Требуется авторизация</p>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>Статическая страница. Без cookie, без аналитики, без сбора данных.</p>
+  </div>
+</footer>
+</body>
+</html>
