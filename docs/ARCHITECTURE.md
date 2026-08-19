@@ -188,7 +188,7 @@ LLM и не создаёт `audit_runs`.
 Frontend не реализует отдельный список документов, фильтр документов по `status` или
 отдельную карточку документа. Исходный документ показывается только на странице
 результата через `GET /api/documents/{document_id}`. Backend-эндпоинты списка и детали
-документа при этом остаются частью публичного API.
+документа при этом остаются частью HTTP API приложения.
 
 ## Транзакционные границы
 
@@ -218,34 +218,57 @@ write/commit, её изменения полностью откатываютс�
 `needs_review=true` сам по себе не означает техническую ошибку. Технический fallback
 определяется только по `used_fallback`.
 
-## Production-развёртывание
+## Production-развертывание
 
-Реальное развёртывание работает по адресу <https://spec-review.elivcloud.org>:
+Финальная топология разделяет публичный портфолио-лендинг и приватное приложение на
+два независимых hostname за одним Traefik:
 
 ```mermaid
 flowchart LR
-  Internet --> Traefik["Traefik v3.6"]
-  Traefik --> TLS["HTTPS / Let's Encrypt"]
-  TLS --> Auth["Infrastructure Basic Auth"]
-  Auth --> Caddy["Caddy frontend container"]
-  Caddy -->|"/api"| FastAPI["FastAPI backend container"]
-  FastAPI --> Volume[("app_data / SQLite")]
+  Internet((Internet)) --> Traefik["Traefik v3.6"]
+
+  subgraph Public["spec-review.elivcloud.org — публичный лендинг"]
+    Landing["Static landing container (Caddy)"]
+  end
+
+  subgraph Private["app.spec-review.elivcloud.org — приватное приложение"]
+    Auth["Infrastructure Basic Auth"] --> Caddy["Caddy frontend container"]
+    Caddy -->|"SPA"| SPA["React SPA"]
+    Caddy -->|"/api"| FastAPI["FastAPI backend container"]
+    FastAPI --> SQLite[("app_data / SQLite")]
+    FastAPI --> OpenAI["OpenAI"]
+  end
+
+  Traefik --> Landing
+  Traefik --> Auth
 ```
 
-- Traefik подключает только `frontend` к внешней сети и направляет трафик на порт `80`
-  Caddy.
-- Caddy раздаёт SPA, выполняет fallback на `index.html` и проксирует `/api` на
-  `backend:8000`.
-- Backend не публикует порт хоста.
-- `/app/data` подключён к именованному volume `app_data`; сохранность SQLite проверена
-  после принудительного пересоздания backend-контейнера.
-- HTTPS и сертификат обслуживает существующий Traefik/Let's Encrypt.
-- Basic Auth реализована существующим Traefik middleware через
-  `TRAEFIK_MIDDLEWARES`; credentials и hash находятся вне репозитория.
+Границы сетей:
 
-Прикладной аутентификации в приложении нет. Инфраструктурная Basic Auth защищает
-развёртывание, но не создаёт пользователей, роли, сессии или изоляцию арендаторов и не
-меняет границы продукта.
+- `landing` подключен только к внешней сети Traefik; сетевого пути к backend или `/api`
+  не существует. На этом хосте `/api` и `/api/health` возвращают статический `404`, и в
+  контейнер не передаются никакие прикладные секреты.
+- `frontend` подключен и к сети Traefik, и к сети приложения (`default`, общая с
+  backend). Basic Auth защищает весь hostname `app.spec-review.elivcloud.org` целиком до
+  того, как запрос доходит до Caddy, включая `/` и `/api/health`.
+- `backend` подключен только к сети приложения (`default`) и не публикует порт хоста;
+  доступ к нему возможен только изнутри сети через same-origin `/api` в Caddy.
+- HTTPS и сертификаты обоих хостов обслуживает существующий Traefik/Let's Encrypt.
+- Basic Auth реализована существующим Traefik middleware через `TRAEFIK_MIDDLEWARES` и
+  применяется только к приватному хосту; credentials и hash находятся вне репозитория.
+- `/app/data` подключен к именованному volume `app_data`; сохранность SQLite проверена
+  после принудительного пересоздания backend-контейнера.
+
+Финальное состояние роутеров Traefik: основной приватный router —
+`Host(app.spec-review.elivcloud.org)` (сервис `ai-spec-review`); публичный лендинг —
+отдельный router `ai-spec-review-landing` на `Host(spec-review.elivcloud.org)` без
+middleware. Временный router поэтапной миграции (`ai-spec-review-app-alias`,
+`docker-compose.private-alias.yml`) в финальном развертывании отсутствует.
+
+Прикладной аутентификации в приложении нет. Инфраструктурная Basic Auth защищает только
+приватный hostname и не создает пользователей, роли, сессии или изоляцию арендаторов —
+границы продукта она не меняет. Публичный лендинг не предоставляет анонимный доступ к
+приложению или API: это отдельная статическая страница, изолированная от backend.
 
 ## Границы безопасности и исключения
 
@@ -258,5 +281,5 @@ flowchart LR
   работа нескольких пользователей, микросервисы, Redis, очереди, Kubernetes и
   LegalTech-позиционирование.
 
-Обязательной частью исходных границ был локальный MVP. Production-развёртывание было
+Обязательной частью исходных границ был локальный MVP. Production-развертывание было
 необязательным следующим шагом и впоследствии было реализовано и проверено.

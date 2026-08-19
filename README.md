@@ -7,11 +7,12 @@ feature request'ов и брифов на автоматизацию. Серви
 противоречия, формирует вопросы и измеримые критерии приёмки, а затем применяет
 детерминированный контроль качества к структурированному ответу LLM.
 
-**Статус:** MVP завершён, production-развёртывание выполнено и проверено.
+**Статус:** MVP завершён, production-развертывание выполнено и проверено.
 
-Демонстрационный экземпляр: <https://spec-review.elivcloud.org>. Доступ защищён
-инфраструктурной Basic Auth в Traefik; учётные данные передаются отдельно и в
-репозитории не хранятся.
+Публичный портфолио-лендинг: <https://spec-review.elivcloud.org> — статическая страница
+без Basic Auth и без сетевого доступа к backend/API. Приватное production-приложение:
+<https://app.spec-review.elivcloud.org> — защищено инфраструктурной Basic Auth в Traefik
+на весь хост целиком; учетные данные передаются отдельно и в репозитории не хранятся.
 
 ## Возможности
 
@@ -31,12 +32,17 @@ feature request'ов и брифов на автоматизацию. Серви
 в SQLite. В Docker Caddy раздаёт SPA и проксирует `/api` во внутренний контейнер
 backend; порт backend на хост не публикуется.
 
-Production-трафик проходит по цепочке:
+Production-трафик приватного приложения (`app.spec-review.elivcloud.org`) проходит по
+цепочке:
 
 ```text
 Internet → Traefik v3.6 → HTTPS / Let's Encrypt → Basic Auth middleware
          → Caddy frontend → /api proxy → FastAPI backend → SQLite volume
 ```
+
+Публичный портфолио-лендинг (`spec-review.elivcloud.org`) — отдельный статический сервис
+Caddy без Basic Auth, подключенный только к сети Traefik и без сетевого доступа к
+backend или `/api`.
 
 Подробности: [архитектура](docs/ARCHITECTURE.md),
 [модель данных](docs/DATA_MODEL.md), [API-контракты](docs/API_CONTRACTS.md).
@@ -105,15 +111,17 @@ Internet → Traefik v3.6 → HTTPS / Let's Encrypt → Basic Auth middleware
 | `APP_PORT` | `8080` | Локальная публикация Caddy только на `127.0.0.1`. |
 | `VITE_API_BASE_URL` | `http://127.0.0.1:8000/api` | Только для отдельного frontend-запуска; Docker-образ собирается со значением `/api`. Шаблон находится в `frontend/.env.example`. |
 
-### Только production-развёртывание за Traefik
+### Только production-развертывание за Traefik
 
 | Переменная | Назначение |
 | --- | --- |
-| `APP_HOST` | Production hostname без схемы и пути. |
+| `APP_HOST` | Hostname приватного аутентифицированного приложения без схемы и пути (Basic Auth, `/api`, SQLite), например `app.spec-review.elivcloud.org`. |
+| `PUBLIC_HOST` | Hostname публичного статического лендинга (`docker-compose.portfolio.yml`), без Basic Auth и без доступа к backend/API, например `spec-review.elivcloud.org`. |
 | `TRAEFIK_NETWORK` | Существующая внешняя Docker-сеть Traefik. |
 | `TRAEFIK_ENTRYPOINT` | HTTPS entrypoint Traefik, по умолчанию `websecure`. |
 | `TRAEFIK_CERTRESOLVER` | Механизм получения сертификатов Traefik, по умолчанию `letsencrypt`. |
 | `TRAEFIK_MIDDLEWARES` | Ссылка на уже настроенный middleware, обязательная только с `docker-compose.traefik-auth.yml`. |
+| `APP_ALIAS_HOST` | Только временная миграция хоста (`docker-compose.private-alias.yml`): второй аутентифицированный router для уже существующего frontend. Финальное production-развертывание этот overlay и переменную не использует. |
 
 Секреты передаются backend через переменные окружения контейнера, не используются как
 аргументы сборки и не копируются в образы.
@@ -192,7 +200,7 @@ Frontend-маршруты: `/`, `/reviews`, `/reviews/:reviewId`, `/audit`; не
 
 ## Проверка качества
 
-Последняя полная автоматическая проверка перед production-развёртыванием:
+Последняя полная автоматическая проверка перед production-развертыванием:
 
 - backend: `582 passed`;
 - frontend: `408 passed`;
@@ -216,31 +224,47 @@ npm run lint
 npm run build
 ```
 
-## Production-развёртывание
+## Production-развертывание
 
-Рабочий экземпляр: <https://spec-review.elivcloud.org>.
+Публичный портфолио-лендинг: <https://spec-review.elivcloud.org>. Приватное
+production-приложение: <https://app.spec-review.elivcloud.org>.
 
-- HTTPS завершается существующим Traefik v3.6; сертификат выпускается через Let's Encrypt.
-- Доступ защищён Basic Auth middleware на уровне Traefik. Учётные данные и их хеши не
-  хранятся в репозитории и предоставляются отдельно.
-- Прикладная аутентификация и роли намеренно остаются вне границ продукта; инфраструктурная
-  Basic Auth не меняет эту границу.
-- Traefik направляет hostname на Caddy frontend, Caddy проксирует `/api` в FastAPI.
-- Backend не публикует порт хоста.
+Оба хоста обслуживаются раздельными сервисами за одним Traefik и полностью изолированы
+друг от друга:
+
+- **Публичный лендинг** (`spec-review.elivcloud.org`) — статический сайт на Caddy без
+  Basic Auth. Контейнер `landing` подключен только к внешней сети Traefik и не имеет
+  сетевого пути к backend; `/api` и `/api/health` на этом хосте возвращают статический
+  `404`. В контейнер не передаются никакие прикладные секреты.
+- **Приватное приложение** (`app.spec-review.elivcloud.org`) — SPA и `/api` реального
+  продукта. Basic Auth middleware Traefik защищает весь хост целиком до того, как запрос
+  доходит до Caddy: неаутентифицированные `/` и `/api/health` возвращают `401`. После
+  аутентификации Caddy отдает SPA (включая прямой refresh внутренних маршрутов) и
+  проксирует same-origin `/api` в FastAPI. Backend не публикует порт хоста и не
+  подключен к сети Traefik.
+- HTTPS для обоих хостов завершается существующим Traefik v3.6; сертификаты выпускаются
+  через Let's Encrypt.
+- Прикладная аутентификация и роли намеренно остаются вне границ продукта;
+  инфраструктурная Basic Auth приватного хоста не меняет эту границу.
 - SQLite хранится в именованном Docker volume `app_data` и переживает пересоздание
   backend-контейнера.
 
-Production-конфигурация Compose использует базовый файл и два overlay-файла:
+Production-конфигурация Compose использует базовый файл и три overlay-файла:
 
 ```bash
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.traefik-auth.yml config -q
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.traefik-auth.yml up -d --build
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.traefik-auth.yml -f docker-compose.portfolio.yml config -q
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.traefik-auth.yml -f docker-compose.portfolio.yml up -d --build
 ```
 
 Traefik, DNS и механизм получения сертификатов уже должны существовать во внешней
-инфраструктуре; репозиторий их не создаёт. При использовании
+инфраструктуре; репозиторий их не создает. При использовании
 `docker-compose.traefik-auth.yml` соответствующий Basic Auth middleware также должен быть
 заранее создан во внешней инфраструктуре.
+
+`docker-compose.private-alias.yml` в финальный steady-state запуск не входит — это
+временный артефакт поэтапной миграции хоста (второй аутентифицированный router на
+`APP_ALIAS_HOST` для уже существующего frontend, использовавшийся только на время
+переключения `APP_HOST` на текущее значение).
 
 ## Документация
 
